@@ -5,41 +5,68 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../lib/common.sh"
 
-section "07 JMX exporter ($KAFKA_JMX_METRICS_URL)"
+section "07  JMX exporter"
+kv "URL" "$KAFKA_JMX_METRICS_URL"
 
 if ! have curl; then
-  echo "curl required"
+  err "curl required"
   exit 1
 fi
 
 tmp="$(mktemp)"
 if ! curl -sf -m 15 -o "$tmp" "$KAFKA_JMX_METRICS_URL"; then
-  echo "ERROR: cannot fetch $KAFKA_JMX_METRICS_URL"
+  err "cannot fetch $KAFKA_JMX_METRICS_URL"
   exit 1
 fi
 cp "$tmp" "$REPORT_DIR/jmx_metrics_raw.prom"
-echo "fetched bytes=$(wc -c <"$tmp")"
+ok "fetched $(wc -c <"$tmp") bytes → $REPORT_DIR/jmx_metrics_raw.prom"
 
-subsection "Cluster controller / replica health"
-grep -E 'underreplicatedpartitions_value|offlinepartitionscount_value|activecontrollercount_value|activebrokercount_value|globaltopiccount_value|globalpartitioncount_value|lastappliedrecordlagms_value|requestqueuesize_value$|responsequeuesize_value$|fencedbrokercount_value|metadataerrorcount_value' \
-  "$tmp" | grep -v '^#' || true
+# Pretty key=value extract for selected gauges
+_jmx_val() {
+  local pat="$1"
+  awk -v p="$pat" '
+    $0 !~ /^#/ && index($0, p) {
+      print $NF
+      exit
+    }
+  ' "$tmp"
+}
 
-subsection "JVM memory / GC / threads"
-grep -E 'jvm_memory_used_bytes|jvm_memory_max_bytes|jvm_gc_collection_seconds|jvm_threads_current|process_cpu_seconds_total' \
-  "$tmp" | grep -v '^#' | head -40 || true
+subsection "Cluster health"
+kv "active brokers" "$(_jmx_val 'activebrokercount_value')"
+kv "active controller" "$(_jmx_val 'activecontrollercount_value')"
+kv "topics" "$(_jmx_val 'globaltopiccount_value')"
+kv "partitions" "$(_jmx_val 'globalpartitioncount_value')"
+kv "under-replicated" "$(_jmx_val 'underreplicatedpartitions_value')"
+kv "offline partitions" "$(_jmx_val 'offlinepartitionscount_value')"
+kv "metadata lag ms" "$(_jmx_val 'lastappliedrecordlagms_value')"
+kv "request queue" "$(_jmx_val 'requestqueuesize_value')"
+kv "fenced brokers" "$(_jmx_val 'fencedbrokercount_value')"
 
-subsection "Broker throughput (1m rates)"
-grep -E 'kafka_server_brokertopicmetrics_total_(messagesinpersec_oneminuterate|bytesinpersec_oneminuterate|bytesoutpersec_oneminuterate|totalfetchrequestspersec_oneminuterate|totalproducerequestspersec_oneminuterate|failedfetchrequestspersec_oneminuterate|failedproducerequestspersec_oneminuterate) ' \
-  "$tmp" | grep -v '^#' || true
+subsection "JVM"
+kv "heap used bytes" "$(_jmx_val 'jvm_memory_used_bytes{area="heap"}')"
+kv "heap max bytes" "$(_jmx_val 'jvm_memory_max_bytes{area="heap"}')"
+kv "threads" "$(_jmx_val 'jvm_threads_current')"
+kv "GC young count" "$(_jmx_val 'jvm_gc_collection_seconds_count{gc="G1 Young Generation"}')"
+kv "GC old count" "$(_jmx_val 'jvm_gc_collection_seconds_count{gc="G1 Old Generation"}')"
 
-subsection "Request counts (lifetime) for admin-heavy APIs"
+subsection "Throughput (1m rate)"
+kv "messages in/s" "$(_jmx_val 'total_messagesinpersec_oneminuterate')"
+kv "bytes in/s" "$(_jmx_val 'total_bytesinpersec_oneminuterate')"
+kv "bytes out/s" "$(_jmx_val 'total_bytesoutpersec_oneminuterate')"
+kv "fetch req/s" "$(_jmx_val 'total_totalfetchrequestspersec_oneminuterate')"
+kv "produce req/s" "$(_jmx_val 'total_totalproducerequestspersec_oneminuterate')"
+kv "failed fetch/s" "$(_jmx_val 'total_failedfetchrequestspersec_oneminuterate')"
+kv "failed produce/s" "$(_jmx_val 'total_failedproducerequestspersec_oneminuterate')"
+
+subsection "Admin-heavy request counts (lifetime)"
 grep -E 'kafka_network_requestmetrics_totaltimems_count\{request="(Metadata|DescribeConfigs|DescribeGroups|ListGroups|OffsetFetch|FindCoordinator|ApiVersions|Produce|Fetch)"\}' \
-  "$tmp" || true
+  "$tmp" | sed -E 's/.*request="([^"]+)".* ([0-9.eE+-]+)$/  \1\t\2/' | column -t -s $'\t' 2>/dev/null \
+  || grep -E 'kafka_network_requestmetrics_totaltimems_count\{request="(Metadata|DescribeConfigs|DescribeGroups|ListGroups|OffsetFetch|FindCoordinator|ApiVersions|Produce|Fetch)"\}' "$tmp" || true
 
-subsection "Metadata / DescribeConfigs error counts"
+subsection "Metadata / DescribeConfigs errors"
 grep -E 'kafka_network_requestmetrics_errorspersec_count\{request="(Metadata|DescribeConfigs)' \
-  "$tmp" | head -40 || true
+  "$tmp" | sed -E 's/^kafka_network_requestmetrics_errorspersec_count\{request="([^"]+), error=([^"]+)"\} ([0-9.eE+-]+)$/  \1  error=\2  count=\3/' | head -20 || true
 
 rm -f "$tmp"
-echo
-echo "Full scrape saved to $REPORT_DIR/jmx_metrics_raw.prom"
+info "Raw Prometheus scrape kept for deeper grep."

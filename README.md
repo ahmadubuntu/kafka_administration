@@ -37,6 +37,9 @@ chmod +x run_all.sh scripts/*.sh
 
 Reports land in `reports/<timestamp>/`.
 
+Output uses boxed sections, aligned tables, status badges, and progress bars on a
+TTY. Disable color with `NO_COLOR=1` or `KAFKA_ADMIN_COLOR=0`.
+
 ## Quick start (from your laptop via SSH)
 
 ```bash

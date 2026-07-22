@@ -30,16 +30,90 @@ export REPORT_DIR="${REPORT_DIR:-$_ROOT_DIR/reports}"
 
 mkdir -p "$REPORT_DIR"
 
+# ---- formatting (TTY + color; disable with NO_COLOR=1) ----
+_use_color() {
+  [[ -z "${NO_COLOR:-}" ]] || return 1
+  [[ "${KAFKA_ADMIN_COLOR:-}" != "0" ]] || return 1
+  [[ -t 1 ]] || return 1
+  return 0
+}
+
+if _use_color; then
+  C_RESET=$'\033[0m'
+  C_BOLD=$'\033[1m'
+  C_DIM=$'\033[2m'
+  C_RED=$'\033[31m'
+  C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'
+  C_BLUE=$'\033[34m'
+  C_MAGENTA=$'\033[35m'
+  C_CYAN=$'\033[36m'
+  C_GRAY=$'\033[90m'
+else
+  C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""
+  C_YELLOW=""; C_BLUE=""; C_MAGENTA=""; C_CYAN=""; C_GRAY=""
+fi
+
+_rule() {
+  # _rule 70 ─
+  local n="$1" ch="${2:-─}" line
+  printf -v line '%*s' "$n" ''
+  echo "${line// /$ch}"
+}
+
 section() {
+  local title="$*"
+  local width=72
+  local inner
   echo
-  echo "============================================================"
-  echo " $*"
-  echo "============================================================"
+  echo "${C_CYAN}╭$(_rule $((width - 2)))╮${C_RESET}"
+  printf -v inner " %s" "$title"
+  printf "${C_CYAN}│${C_RESET}${C_BOLD}%-$((width - 2))s${C_RESET}${C_CYAN}│${C_RESET}\n" "$inner"
+  echo "${C_CYAN}╰$(_rule $((width - 2)))╯${C_RESET}"
 }
 
 subsection() {
   echo
-  echo "--- $* ---"
+  echo "${C_BLUE}▸${C_RESET} ${C_BOLD}$*${C_RESET}"
+  echo "${C_DIM}  ························································${C_RESET}"
+}
+
+kv() {
+  # kv "key" "value"
+  local key="$1"
+  local value="$2"
+  printf "  ${C_DIM}%-22s${C_RESET} %s\n" "$key" "$value"
+}
+
+badge() {
+  local level
+  level="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
+  case "$level" in
+    OK) echo -n "${C_GREEN}${C_BOLD}[OK]${C_RESET}" ;;
+    WATCH|WARN|TIGHT) echo -n "${C_YELLOW}${C_BOLD}[${level}]${C_RESET}" ;;
+    CRITICAL|ERROR|FAIL) echo -n "${C_RED}${C_BOLD}[${level}]${C_RESET}" ;;
+    *) echo -n "${C_GRAY}${C_BOLD}[${level}]${C_RESET}" ;;
+  esac
+}
+
+status_line() {
+  # status_line OK "message"
+  local level="$1"; shift
+  echo "  $(badge "$level") $*"
+}
+
+info()  { echo "  ${C_BLUE}ℹ${C_RESET} ${C_DIM}$*${C_RESET}"; }
+ok()    { status_line OK "$*"; }
+warn()  { status_line WARN "$*"; }
+err()   { status_line ERROR "$*"; }
+bullet(){ echo "  ${C_CYAN}•${C_RESET} $*"; }
+
+step_banner() {
+  # step_banner 3 11 "03_cluster_health.sh"
+  local idx="$1" total="$2" name="$3"
+  echo
+  echo "${C_MAGENTA}┏━━${C_RESET} ${C_BOLD}Step ${idx}/${total}${C_RESET}  ${C_DIM}${name}${C_RESET}"
+  echo "${C_MAGENTA}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
 }
 
 have() {
@@ -50,7 +124,7 @@ require_cmd() {
   local c
   for c in "$@"; do
     if ! have "$c"; then
-      echo "ERROR: required command not found: $c" >&2
+      err "required command not found: $c"
       return 1
     fi
   done
@@ -61,13 +135,12 @@ kafka_tool() {
   shift
   local path="$KAFKA_BIN/$tool"
   if [[ ! -x "$path" ]]; then
-    echo "ERROR: Kafka tool not found or not executable: $path" >&2
+    err "Kafka tool not found or not executable: $path"
     return 1
   fi
   "$path" "$@"
 }
 
-# Admin CLI against configured bootstrap (+ optional command-config)
 kafka_admin() {
   local tool="$1"
   shift
@@ -78,7 +151,6 @@ kafka_admin() {
   kafka_tool "$tool" "${args[@]}" "$@"
 }
 
-# Same but force local plaintext bootstrap (no command-config)
 kafka_admin_local() {
   local tool="$1"
   shift
@@ -86,7 +158,6 @@ kafka_admin_local() {
 }
 
 redact_props() {
-  # Redact secrets from a properties stream
   sed -E 's/(password|secret|key|sasl\.jaas\.config)=.*/\1=***/I'
 }
 
@@ -95,32 +166,23 @@ http_ok() {
   curl -sf -m 5 -o /dev/null "$url"
 }
 
-save_report() {
-  local name="$1"
-  local dest="$REPORT_DIR/${name}.txt"
-  cat >"$dest"
-  echo "(saved: $dest)" >&2
-}
-
 timestamp() {
   date -Iseconds
 }
 
 print_env_summary() {
   section "Environment"
-  cat <<EOF
-time                 : $(timestamp)
-host                 : $(hostname)
-KAFKA_HOME           : $KAFKA_HOME
-KAFKA_BIN            : $KAFKA_BIN
-KAFKA_SERVER_PROPERTIES: $KAFKA_SERVER_PROPERTIES
-KAFKA_COMMAND_CONFIG : $KAFKA_COMMAND_CONFIG
-KAFKA_BOOTSTRAP      : $KAFKA_BOOTSTRAP
-KAFKA_BOOTSTRAP_LOCAL: $KAFKA_BOOTSTRAP_LOCAL
-KAFKA_LOG_DIR        : $KAFKA_LOG_DIR
-KAFKA_SYSTEMD_UNIT   : $KAFKA_SYSTEMD_UNIT
-KAFKA_JMX_METRICS_URL: $KAFKA_JMX_METRICS_URL
-KAFKA_JOLOKIA_URL    : $KAFKA_JOLOKIA_URL
-REPORT_DIR           : $REPORT_DIR
-EOF
+  kv "time" "$(timestamp)"
+  kv "host" "$(hostname)"
+  kv "KAFKA_HOME" "$KAFKA_HOME"
+  kv "KAFKA_BIN" "$KAFKA_BIN"
+  kv "server.properties" "$KAFKA_SERVER_PROPERTIES"
+  kv "command-config" "$KAFKA_COMMAND_CONFIG"
+  kv "bootstrap" "$KAFKA_BOOTSTRAP"
+  kv "bootstrap.local" "$KAFKA_BOOTSTRAP_LOCAL"
+  kv "log.dirs" "$KAFKA_LOG_DIR"
+  kv "systemd unit" "$KAFKA_SYSTEMD_UNIT"
+  kv "JMX metrics" "$KAFKA_JMX_METRICS_URL"
+  kv "Jolokia" "$KAFKA_JOLOKIA_URL"
+  kv "REPORT_DIR" "$REPORT_DIR"
 }

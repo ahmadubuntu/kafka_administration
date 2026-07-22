@@ -5,35 +5,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../lib/common.sh"
 
-section "10 What to look for"
+section "10  What to look for"
 
-cat <<'EOF'
-1) admin.properties / KAFKA_BOOTSTRAP must match THIS cluster's advertised EXTERNAL.
-   Timeout on listTopics (~60s) almost always means wrong bootstrap.
+bullet "admin.properties / KAFKA_BOOTSTRAP must match this cluster's advertised EXTERNAL"
+info "Timeout on listTopics (~60s) almost always means wrong bootstrap"
 
-2) Cluster health: UnderReplicatedPartitions=0 and OfflinePartitionsCount=0.
+bullet "Cluster health: UnderReplicatedPartitions=0 and OfflinePartitionsCount=0"
 
-3) UI slowness with healthy broker:
-   - DescribeConfigs ResponseSendTimeMs p95/p99 in seconds (Jolokia script)
-   - LocalTimeMs still ~tens of ms  => broker OK, client/UI draining slowly
-   - Heavy pages: describe --all-groups, describe all topics + configs
+bullet "UI slow but broker healthy → check DescribeConfigs ResponseSendTimeMs (Jolokia)"
+info "LocalTimeMs tens of ms + ResponseSend seconds ⇒ client/UI drain issue"
 
-4) Connection pressure:
-   - Thousands of ESTABLISHED on :9094 with num.network.threads=3 is a smell
-   - Check top peer IPs / misconfigured clients (SASL handshake errors)
+bullet "Heavy UI pages: describe --all-groups, describe all topics + configs"
 
-5) Auth noise:
-   - Constant DefaultDeny in authorizer log = clients probing forbidden topics/groups
+bullet "Connection pressure: many ESTABLISHED on :9094 with low num.network.threads"
 
-6) Resources:
-   - Disk for log.dirs, heap (no frequent Full GC), CPU of kafka java process
+bullet "Auth noise: constant DefaultDeny in authorizer log"
 
-7) Capacity / FD (script 11):
-   - Open FD should stay well below ~70% of Max open files
-   - Compare partitions/connections to comfort / caution / stretch bands
-   - Page cache (MemAvailable) matters as much as heap for Kafka
+bullet "Capacity script (11): FD << 70% max, partitions/connections vs comfort/caution/stretch"
+info "Page cache (MemAvailable) matters as much as heap for Kafka"
 
-Reports directory:
-EOF
-echo "  $REPORT_DIR"
-ls -la "$REPORT_DIR" 2>/dev/null || true
+echo
+subsection "Reports written"
+kv "directory" "$REPORT_DIR"
+if [[ -d "$REPORT_DIR" ]]; then
+  ls -lah "$REPORT_DIR" | sed 's/^/  /'
+fi

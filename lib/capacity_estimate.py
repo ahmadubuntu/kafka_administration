@@ -17,6 +17,20 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional, Tuple
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from format import (  # noqa: E402
+    badge,
+    box,
+    bullet,
+    fmt_bytes,
+    fmt_num,
+    note,
+    progress_bar,
+    section,
+    subsection,
+    table,
+)
+
 
 JOLOKIA = os.environ.get("KAFKA_JOLOKIA_URL", "http://127.0.0.1:8779/jolokia").rstrip("/")
 JMX_URL = os.environ.get("KAFKA_JMX_METRICS_URL", "http://127.0.0.1:7071/metrics")
@@ -97,7 +111,6 @@ def read_limits(pid: int) -> Tuple[Optional[int], Optional[int]]:
             for line in fh:
                 if "open files" in line.lower():
                     parts = line.split()
-                    # Max open files  soft hard units
                     nums = [p for p in parts if p.isdigit()]
                     if len(nums) >= 2:
                         soft, hard = int(nums[0]), int(nums[1])
@@ -113,7 +126,7 @@ def meminfo() -> Dict[str, int]:
             for line in fh:
                 m = re.match(r"(\w+):\s+(\d+)", line)
                 if m:
-                    info[m.group(1)] = int(m.group(2)) * 1024  # bytes
+                    info[m.group(1)] = int(m.group(2)) * 1024
     except OSError:
         pass
     return info
@@ -134,12 +147,21 @@ def worst(*levels: str) -> str:
     return max(levels, key=lambda x: order.get(x, -1))
 
 
+def util_vs(value: float, comfort: float, caution: float, stretch: float) -> Tuple[float, str]:
+    if stretch <= 0:
+        return 0.0, "UNKNOWN"
+    if value <= comfort:
+        return value / max(comfort, 1), "OK"
+    if value <= caution:
+        return value / max(caution, 1), "WATCH"
+    if value <= stretch:
+        return value / max(stretch, 1), "TIGHT"
+    return value / max(stretch, 1), "CRITICAL"
+
+
 def main() -> int:
-    print("============================================================")
-    print(" 11 Capacity / headroom estimate (heuristic)")
-    print("============================================================")
-    print("NOTE: Estimates for planning only — validate under your workload.")
-    print()
+    section("11  Capacity / headroom estimate")
+    note("Heuristic planning only — validate under your real workload.")
 
     props = parse_props(SERVER_PROPS)
     net_threads = int(props.get("num.network.threads", "3") or 3)
@@ -164,7 +186,7 @@ def main() -> int:
         os_bean = {}
     open_fd = os_bean.get("OpenFileDescriptorCount")
     max_fd = os_bean.get("MaxFileDescriptorCount") or hard_fd or soft_fd
-    proc_cpu = os_bean.get("ProcessCpuLoad")  # 0..1
+    proc_cpu = os_bean.get("ProcessCpuLoad")
     sys_cpu = os_bean.get("CpuLoad")
     cores = int(os_bean.get("AvailableProcessors") or sh("nproc").strip() or 1)
 
@@ -173,7 +195,6 @@ def main() -> int:
     urp = jmx_gauge("underreplicatedpartitions_value")
     offline = jmx_gauge("offlinepartitionscount_value")
 
-    # connections on client listeners
     conn_9094 = sh("ss -tn state established '( sport = :9094 )' 2>/dev/null | tail -n +2 | wc -l").strip()
     conn_9092 = sh("ss -tn state established '( sport = :9092 )' 2>/dev/null | tail -n +2 | wc -l").strip()
     try:
@@ -184,7 +205,6 @@ def main() -> int:
     mem = meminfo()
     mem_total = mem.get("MemTotal", 0)
     mem_avail = mem.get("MemAvailable", 0)
-    mem_free = mem.get("MemFree", 0)
     cached = mem.get("Cached", 0) + mem.get("Buffers", 0)
 
     heap = jolokia_read("java.lang:type=Memory")
@@ -193,9 +213,8 @@ def main() -> int:
         heap_used = heap["HeapMemoryUsage"].get("used")
         heap_max = heap["HeapMemoryUsage"].get("max")
 
-    log_files = sh("find %s -type f 2>/dev/null | wc -l" % LOG_DIR).strip()
     try:
-        log_files_n = int(log_files or 0)
+        log_files_n = int(sh("find %s -type f 2>/dev/null | wc -l" % LOG_DIR).strip() or 0)
     except ValueError:
         log_files_n = 0
 
@@ -209,65 +228,77 @@ def main() -> int:
         except ValueError:
             pass
 
-    print("--- Observed ---")
-    print("pid                 :", pid)
-    print("cpu_cores           :", cores)
-    print("num.network.threads :", net_threads)
-    print("num.io.threads      :", io_threads)
-    print("topics / partitions :", topics, "/", partitions)
-    print("URP / offline       :", urp, "/", offline)
-    print("connections :9092+9094 :", connections, "(9094=%s 9092=%s)" % (conn_9094, conn_9092))
-    print("open_fd / max_fd    :", open_fd, "/", max_fd, "(ulimit soft/hard=%s/%s)" % (soft_fd, hard_fd))
-    print("log segment files   :", log_files_n, "(on disk; not all held open)")
-    if rss is not None:
-        print("kafka RSS           : %.1f GiB" % (rss / 1024**3))
-    if pcpu is not None:
-        print("kafka %%CPU (ps)     : %.1f (of one core; across %d cores ~%.0f%% machine)" % (
-            pcpu, cores, (pcpu / cores) if cores else 0
-        ))
-    if proc_cpu is not None:
-        print("ProcessCpuLoad      : %.1f%%" % (float(proc_cpu) * 100))
-    if sys_cpu is not None:
-        print("CpuLoad (system)    : %.1f%%" % (float(sys_cpu) * 100))
-    if mem_total:
-        print(
-            "RAM total/avail     : %.1f / %.1f GiB  (cache+buff ~%.1f GiB)"
-            % (mem_total / 1024**3, mem_avail / 1024**3, cached / 1024**3)
-        )
-    if heap_used is not None and heap_max:
-        print(
-            "Heap used/max       : %.1f / %.1f GiB (%.0f%%)"
-            % (heap_used / 1024**3, heap_max / 1024**3, 100.0 * heap_used / heap_max)
-        )
-    if disk_pct is not None and disk_size:
-        print(
-            "log.dirs disk       : %.0f%% used (%.1f / %.1f GiB, avail %.1f GiB)"
-            % (disk_pct, disk_used / 1024**3, disk_size / 1024**3, disk_avail / 1024**3)
-        )
+    subsection("Observed")
+    table(
+        ["metric", "value"],
+        [
+            ["pid", pid if pid is not None else "—"],
+            ["CPU cores", cores],
+            ["network / io threads", "%d / %d" % (net_threads, io_threads)],
+            ["topics / partitions", "%s / %s" % (fmt_num(topics, 0), fmt_num(partitions, 0))],
+            ["URP / offline", "%s / %s" % (fmt_num(urp, 0), fmt_num(offline, 0))],
+            [
+                "connections (:9094/:9092)",
+                "%d  (%s / %s)" % (connections, conn_9094 or "0", conn_9092 or "0"),
+            ],
+            [
+                "open FD / max",
+                "%s / %s  (ulimit %s/%s)"
+                % (fmt_num(open_fd, 0), fmt_num(max_fd, 0), soft_fd, hard_fd),
+            ],
+            ["log files on disk", "%s  (not all held open)" % fmt_num(log_files_n, 0)],
+            ["kafka RSS", fmt_bytes(rss) if rss is not None else "—"],
+            [
+                "kafka %%CPU (ps)",
+                ("%.1f  (~%.0f%% of machine)" % (pcpu, pcpu / cores)) if pcpu is not None else "—",
+            ],
+            [
+                "ProcessCpuLoad",
+                ("%.1f%%" % (float(proc_cpu) * 100)) if proc_cpu is not None else "—",
+            ],
+            ["system CpuLoad", ("%.1f%%" % (float(sys_cpu) * 100)) if sys_cpu is not None else "—"],
+            [
+                "RAM total / avail",
+                "%s / %s  (cache+buff %s)"
+                % (fmt_bytes(mem_total), fmt_bytes(mem_avail), fmt_bytes(cached))
+                if mem_total
+                else "—",
+            ],
+            [
+                "Heap used / max",
+                "%s / %s  (%.0f%%)"
+                % (fmt_bytes(heap_used), fmt_bytes(heap_max), 100.0 * heap_used / heap_max)
+                if heap_used is not None and heap_max
+                else "—",
+            ],
+            [
+                "log.dirs disk",
+                "%.0f%% used  (%s / %s, avail %s)"
+                % (
+                    disk_pct,
+                    fmt_bytes(disk_used),
+                    fmt_bytes(disk_size),
+                    fmt_bytes(disk_avail),
+                )
+                if disk_pct is not None and disk_size
+                else "—",
+            ],
+        ],
+        aligns=["l", "l"],
+    )
 
-    # ---- ceilings (heuristics) ----
-    # FD: keep 50% headroom; budget for conns + ~2 FD/partition (index+log hot) + base 2048
     max_fd_i = int(max_fd or soft_fd or 0)
     open_fd_i = int(open_fd or 0)
     parts_i = int(partitions or 0)
-    topics_i = int(topics or 0)
 
     fd_safe = int(max_fd_i * 0.70) if max_fd_i else 0
-    # conservative open-FD model at ceiling: base + connections + 2*partitions
-    # invert for max partitions given current connections
     fd_part_ceiling = max(0, (fd_safe - 2048 - connections) // 2) if fd_safe else 0
-    # connection ceiling from FD budget (assume ~1 FD/conn + 2*current_partitions + base)
     fd_conn_ceiling = max(0, fd_safe - 2048 - 2 * parts_i) if fd_safe else 0
 
-    # Partition ceilings from common planning bands + resources
-    # - comfort ~ cores*500 to cores*800
-    # - caution absolute ~4000/broker (classic guidance)
-    # - stretch ~8000 with modern Kafka if load is light
     part_comfort = cores * 500
     part_caution = min(cores * 1000, 4000)
     part_stretch = min(cores * 1500, 8000)
     if heap_max:
-        # ~0.5–1 MiB broker metadata/buffers ballpark per partition on heap pressure side
         heap_part = int(max(0, (heap_max / 1024**2) - 1536) / 0.75)
         part_caution = min(part_caution, heap_part)
         part_stretch = min(part_stretch, int(heap_part * 1.5))
@@ -275,15 +306,12 @@ def main() -> int:
         part_stretch = min(part_stretch, fd_part_ceiling)
         part_caution = min(part_caution, fd_part_ceiling)
 
-    # Connection ceilings
-    # network threads can multiplex many idle conns; memory/FD dominate
     conn_comfort = max(2000, cores * 400)
     conn_caution = max(5000, cores * 1000)
     conn_stretch = max(10000, cores * 2000)
     if fd_conn_ceiling:
         conn_stretch = min(conn_stretch, fd_conn_ceiling)
         conn_caution = min(conn_caution, fd_conn_ceiling)
-    # with few network threads, compress upper bands (keep comfort <= caution <= stretch)
     if net_threads < max(3, cores // 2):
         conn_caution = min(conn_caution, max(conn_comfort, net_threads * 1000))
         conn_stretch = min(conn_stretch, max(conn_caution, net_threads * 2000))
@@ -292,34 +320,19 @@ def main() -> int:
     if conn_stretch < conn_caution:
         conn_stretch = conn_caution
 
-    print()
-    print("--- Estimated ceilings (single broker, planning bands) ---")
-    print("Partitions / broker :")
-    print("  comfort ~%d   caution ~%d   stretch ~%d" % (part_comfort, part_caution, part_stretch))
-    print("Connections / broker:")
-    print("  comfort ~%d   caution ~%d   stretch ~%d" % (conn_comfort, conn_caution, conn_stretch))
-    print("Open files          :")
-    print("  warn >70%% of max  (70%% of %d = %d)" % (max_fd_i, fd_safe))
-    print()
-    print("How ceilings were bounded:")
-    print("  - partitions: cores, heap size, FD budget, classic ~4k caution/broker")
-    print("  - connections: cores, num.network.threads, FD budget")
-    print("  - FD model: open ≈ base(2k) + connections + ~2 * partitions (rough)")
+    subsection("Estimated ceilings (single broker)")
+    table(
+        ["resource", "comfort", "caution", "stretch"],
+        [
+            ["partitions", fmt_num(part_comfort, 0), fmt_num(part_caution, 0), fmt_num(part_stretch, 0)],
+            ["connections", fmt_num(conn_comfort, 0), fmt_num(conn_caution, 0), fmt_num(conn_stretch, 0)],
+            ["open FD warn@", "—", fmt_num(fd_safe, 0) + " (70%)", fmt_num(max_fd_i, 0)],
+        ],
+    )
+    note("Bounded by cores, heap, FD budget, num.network.threads, classic ~4k partitions/broker.")
 
-    # ---- utilization vs comfort/caution ----
-    def util_vs(value: float, comfort: float, caution: float, stretch: float) -> Tuple[float, str]:
-        if stretch <= 0:
-            return 0.0, "UNKNOWN"
-        if value <= comfort:
-            return value / max(comfort, 1), "OK"
-        if value <= caution:
-            return value / max(caution, 1), "WATCH"
-        if value <= stretch:
-            return value / max(stretch, 1), "TIGHT"
-        return value / max(stretch, 1), "CRITICAL"
-
-    part_u, part_l = util_vs(parts_i, part_comfort, part_caution, part_stretch)
-    conn_u, conn_l = util_vs(connections, conn_comfort, conn_caution, conn_stretch)
+    _, part_l = util_vs(parts_i, part_comfort, part_caution, part_stretch)
+    _, conn_l = util_vs(connections, conn_comfort, conn_caution, conn_stretch)
 
     fd_util = (open_fd_i / max_fd_i) if max_fd_i else 0.0
     fd_l = level(fd_util)
@@ -331,15 +344,14 @@ def main() -> int:
         cpu_frac = min(1.0, (pcpu / 100.0) / cores)
     cpu_l = level(cpu_frac) if cpu_frac is not None else "UNKNOWN"
 
-    mem_l = "UNKNOWN"
     mem_util = 0.0
+    mem_l = "UNKNOWN"
     if mem_total and mem_avail is not None:
-        # pressure if available is small fraction of total
         mem_util = 1.0 - (mem_avail / mem_total)
         mem_l = level(mem_util)
 
-    heap_l = "UNKNOWN"
     heap_util = 0.0
+    heap_l = "UNKNOWN"
     if heap_used and heap_max:
         heap_util = heap_used / heap_max
         heap_l = level(heap_util)
@@ -350,71 +362,105 @@ def main() -> int:
 
     overall = worst(part_l, conn_l, fd_l, cpu_l, mem_l, heap_l, disk_l)
 
-    print()
-    print("--- Headroom scorecard ---")
-    print("partitions : %-8s  (%d vs comfort %d / caution %d / stretch %d)" % (
-        part_l, parts_i, part_comfort, part_caution, part_stretch))
-    print("connections: %-8s  (%d vs comfort %d / caution %d / stretch %d)" % (
-        conn_l, connections, conn_comfort, conn_caution, conn_stretch))
-    print("open files : %-8s  (%.1f%% of max %s)" % (fd_l, fd_util * 100.0, max_fd_i))
-    print("CPU        : %-8s  (%s)" % (
-        cpu_l,
-        ("ProcessCpuLoad %.0f%%" % (cpu_frac * 100)) if cpu_frac is not None else "n/a",
-    ))
-    print("RAM avail  : %-8s  (≈%.0f%% of RAM not Available)" % (mem_l, mem_util * 100))
-    print("Heap       : %-8s  (%.0f%%)" % (heap_l, heap_util * 100))
-    print("Disk logs  : %-8s  (%s)" % (disk_l, ("%.0f%%" % disk_pct) if disk_pct is not None else "n/a"))
-    print()
-    print("OVERALL    :", overall)
+    # progress vs stretch/caution for visual
+    part_ratio = parts_i / part_caution if part_caution else 0
+    conn_ratio = connections / conn_caution if conn_caution else 0
 
-    print()
-    print("--- Verdict ---")
+    subsection("Headroom scorecard")
+    table(
+        ["axis", "status", "usage", "detail"],
+        [
+            [
+                "partitions",
+                badge(part_l),
+                progress_bar(min(part_ratio, 1.0)),
+                "%d / caution %d" % (parts_i, part_caution),
+            ],
+            [
+                "connections",
+                badge(conn_l),
+                progress_bar(min(conn_ratio, 1.0)),
+                "%d / caution %d" % (connections, conn_caution),
+            ],
+            [
+                "open files",
+                badge(fd_l),
+                progress_bar(fd_util),
+                "%.1f%% of %s" % (fd_util * 100.0, fmt_num(max_fd_i, 0)),
+            ],
+            [
+                "CPU",
+                badge(cpu_l),
+                progress_bar(cpu_frac or 0.0),
+                ("ProcessCpuLoad %.0f%%" % (cpu_frac * 100)) if cpu_frac is not None else "n/a",
+            ],
+            [
+                "RAM pressure",
+                badge(mem_l),
+                progress_bar(mem_util),
+                "≈%.0f%% of RAM not Available" % (mem_util * 100),
+            ],
+            [
+                "Heap",
+                badge(heap_l),
+                progress_bar(heap_util),
+                "%.0f%%" % (heap_util * 100),
+            ],
+            [
+                "Disk logs",
+                badge(disk_l),
+                progress_bar((disk_pct or 0) / 100.0),
+                ("%.0f%%" % disk_pct) if disk_pct is not None else "n/a",
+            ],
+        ],
+        aligns=["l", "l", "l", "l"],
+    )
+
     if overall in ("OK", "WATCH"):
-        print(
-            "This node looks able to carry the *current* footprint "
-            "(partitions/connections/FD/disk)."
-        )
+        verdict = "Node can carry the current footprint (partitions / connections / FD / disk)."
     elif overall == "TIGHT":
-        print(
-            "Node is near planning caution bands. Fine short-term, but avoid "
-            "large growth without more brokers / threads / RAM tuning."
-        )
+        verdict = "Near caution bands — OK short-term; avoid large growth without scale-out/tuning."
     else:
-        print(
-            "Node is beyond stretch heuristics or critically utilized on one axis. "
-            "Plan scale-out or reduce partitions/connections."
-        )
+        verdict = "Beyond stretch heuristics or critical on one axis — plan scale-out or reduce load."
 
-    # specific advice for this profile
-    print()
-    print("--- Practical notes for this profile ---")
+    box(
+        "OVERALL  %s" % overall,
+        [
+            verdict,
+            "Headroom to caution →  +%d partitions · +%d connections · +%d FDs"
+            % (
+                max(0, part_caution - parts_i),
+                max(0, conn_caution - connections),
+                max(0, fd_safe - open_fd_i) if max_fd_i else 0,
+            ),
+        ],
+    )
+
+    subsection("Practical notes")
+    notes = []
     if parts_i and part_caution and parts_i > part_comfort:
-        print("- Partition count is above 'comfort'; prefer fewer partitions for new topics.")
+        notes.append("Partition count is above comfort; prefer fewer partitions for new topics.")
     if connections > conn_comfort:
-        print("- Connection count is elevated; check idle clients / connection pooling.")
+        notes.append("Connection count elevated; check idle clients / pooling.")
     if net_threads < cores and connections > 1000:
-        print(
-            "- Consider raising num.network.threads (now %d) toward ~%d on this host."
+        notes.append(
+            "Consider raising num.network.threads (now %d) toward ~%d."
             % (net_threads, max(cores, 8))
         )
     if fd_util < 0.2 and max_fd_i >= 100000:
-        print("- FD limit is generous; open files are NOT the bottleneck today.")
+        notes.append("FD limit is generous — open files are NOT the bottleneck today.")
     if cpu_frac is not None and cpu_frac >= 0.4:
-        print("- Broker CPU is meaningful; UI/admin storms (DescribeConfigs) will hurt more.")
+        notes.append("Broker CPU is meaningful; UI/admin storms (DescribeConfigs) will hurt more.")
     if mem_avail and mem_avail < 2 * 1024**3:
-        print("- MemAvailable < 2GiB: page cache pressure risk for Kafka.")
+        notes.append("MemAvailable < 2GiB: page cache pressure risk.")
     elif mem_avail:
-        print("- MemAvailable looks healthy for page cache (important for Kafka reads).")
+        notes.append("MemAvailable looks healthy for page cache.")
     if disk_pct is not None and disk_pct >= 70:
-        print("- log.dirs disk is getting full; retention/growth is the nearer limit than FD.")
-
-    # remaining headroom numbers
-    print()
-    print("--- Rough remaining headroom (to caution band) ---")
-    print("extra partitions until caution : ~%d" % max(0, part_caution - parts_i))
-    print("extra connections until caution: ~%d" % max(0, conn_caution - connections))
-    if max_fd_i:
-        print("extra open FDs until 70%%     : ~%d" % max(0, fd_safe - open_fd_i))
+        notes.append("log.dirs disk getting full — nearer limit than FD.")
+    if not notes:
+        notes.append("No extra warnings for this profile.")
+    for n in notes:
+        bullet(n)
 
     return 0
 

@@ -9,6 +9,12 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 export REPORT_DIR="${REPORT_DIR:-$ROOT/reports}/$STAMP"
 mkdir -p "$REPORT_DIR"
 
+section "Kafka admin suite"
+kv "host" "$(hostname)"
+kv "started" "$(timestamp)"
+kv "reports" "$REPORT_DIR"
+info "Color output on TTY; set NO_COLOR=1 to disable."
+
 print_env_summary | tee "$REPORT_DIR/00_env.txt"
 
 SCRIPTS=(
@@ -25,23 +31,35 @@ SCRIPTS=(
   10_summary_hints.sh
 )
 
+total="${#SCRIPTS[@]}"
 failed=0
+failed_names=()
+idx=0
 for s in "${SCRIPTS[@]}"; do
+  idx=$((idx + 1))
   path="$ROOT/scripts/$s"
   out="$REPORT_DIR/${s%.sh}.txt"
-  echo
-  echo ">>>> Running $s"
+  step_banner "$idx" "$total" "$s"
   set +e
   bash "$path" 2>&1 | tee "$out"
   rc=${PIPESTATUS[0]}
   set -e
   if [[ $rc -ne 0 ]]; then
-    echo "WARN: $s exited $rc (continuing)" | tee -a "$out"
+    warn "$s exited $rc (continuing)"
+    echo "WARN: $s exited $rc" >>"$out"
     failed=$((failed + 1))
+    failed_names+=("$s")
+  else
+    ok "$s finished"
   fi
 done
 
-section "Done"
-echo "Reports: $REPORT_DIR"
-echo "Failed scripts: $failed"
+section "Suite complete"
+kv "reports" "$REPORT_DIR"
+kv "failed" "$failed / $total"
+if (( failed > 0 )); then
+  warn "Failed: ${failed_names[*]}"
+else
+  ok "All scripts completed successfully"
+fi
 exit 0
