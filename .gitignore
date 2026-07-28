@@ -4,3 +4,5 @@ reports/
 __pycache__/
 *.pyc
 .DS_Store
+config/clusters/*.env
+!config/clusters/*.example.env

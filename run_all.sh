@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
-source "$ROOT/lib/common.sh"
+source "$ROOT/lib/admin_common.sh"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 export REPORT_DIR="${REPORT_DIR:-$ROOT/reports}/$STAMP"

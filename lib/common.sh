@@ -1,188 +1,343 @@
 #!/usr/bin/env bash
-# Shared helpers for Kafka administration scripts.
-# shellcheck disable=SC2034
+# Shared helpers: colors, severity tracking, logging, utilities, report file.
 
-set -euo pipefail
+SCRIPT_VERSION="${SCRIPT_VERSION:-0.1.0}"
 
-_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_ROOT_DIR="$(cd "$_LIB_DIR/.." && pwd)"
+_CHECK_RESULTS=()
+_MAX_SEVERITY=0
+_JSON_RESULTS=()
+REPORT_FILE="${REPORT_FILE:-}"
+_RESULTS_FILE=""
+_RECORD_LOCK=""
+_MAX_SEV_FILE=""
 
-# Load env.sh if present (never commit secrets)
-if [[ -f "$_ROOT_DIR/env.sh" ]]; then
-  # shellcheck disable=SC1091
-  source "$_ROOT_DIR/env.sh"
-elif [[ -f "$_ROOT_DIR/env.example" ]]; then
-  # shellcheck disable=SC1091
-  source "$_ROOT_DIR/env.example"
-fi
-
-export KAFKA_HOME="${KAFKA_HOME:-/opt/kafka}"
-export KAFKA_BIN="${KAFKA_BIN:-$KAFKA_HOME/bin}"
-export KAFKA_SERVER_PROPERTIES="${KAFKA_SERVER_PROPERTIES:-/var/opt/kafka/config/server.properties}"
-export KAFKA_COMMAND_CONFIG="${KAFKA_COMMAND_CONFIG:-/opt/kafka/config/admin.properties}"
-export KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP:-localhost:9092}"
-export KAFKA_BOOTSTRAP_LOCAL="${KAFKA_BOOTSTRAP_LOCAL:-localhost:9092}"
-export KAFKA_LOG_DIR="${KAFKA_LOG_DIR:-/var/opt/kafka/logs}"
-export KAFKA_SYSTEMD_UNIT="${KAFKA_SYSTEMD_UNIT:-kafka}"
-export KAFKA_JMX_METRICS_URL="${KAFKA_JMX_METRICS_URL:-http://127.0.0.1:7071/metrics}"
-export KAFKA_JOLOKIA_URL="${KAFKA_JOLOKIA_URL:-http://127.0.0.1:8779/jolokia}"
-export REPORT_DIR="${REPORT_DIR:-$_ROOT_DIR/reports}"
-
-mkdir -p "$REPORT_DIR"
-
-# ---- formatting (TTY + color; disable with NO_COLOR=1) ----
-_use_color() {
-  [[ -z "${NO_COLOR:-}" ]] || return 1
-  [[ "${KAFKA_ADMIN_COLOR:-}" != "0" ]] || return 1
-  [[ -t 1 ]] || return 1
-  return 0
-}
-
-if _use_color; then
-  C_RESET=$'\033[0m'
-  C_BOLD=$'\033[1m'
-  C_DIM=$'\033[2m'
+if [[ -t 1 ]] && [[ "${NO_COLOR:-}" != "1" ]]; then
   C_RED=$'\033[31m'
   C_GREEN=$'\033[32m'
   C_YELLOW=$'\033[33m'
   C_BLUE=$'\033[34m'
-  C_MAGENTA=$'\033[35m'
   C_CYAN=$'\033[36m'
-  C_GRAY=$'\033[90m'
+  C_MAGENTA=$'\033[35m'
+  C_BOLD=$'\033[1m'
+  C_DIM=$'\033[2m'
+  C_RESET=$'\033[0m'
 else
-  C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""
-  C_YELLOW=""; C_BLUE=""; C_MAGENTA=""; C_CYAN=""; C_GRAY=""
+  C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_CYAN=""; C_MAGENTA=""; C_BOLD=""; C_DIM=""; C_RESET=""
 fi
 
-_rule() {
-  # _rule 70 ─
-  local n="$1" ch="${2:-─}" line
-  printf -v line '%*s' "$n" ''
-  echo "${line// /$ch}"
+strip_ansi() {
+  # shellcheck disable=SC2001
+  printf '%s' "$1" | sed $'s/\033\\[[0-9;]*[[:alpha:]]//g'
 }
 
-section() {
-  local title="$*"
-  local width=72
-  local inner
-  echo
-  echo "${C_CYAN}╭$(_rule $((width - 2)))╮${C_RESET}"
-  printf -v inner " %s" "$title"
-  printf "${C_CYAN}│${C_RESET}${C_BOLD}%-$((width - 2))s${C_RESET}${C_CYAN}│${C_RESET}\n" "$inner"
-  echo "${C_CYAN}╰$(_rule $((width - 2)))╯${C_RESET}"
+emit() {
+  local line="$1"
+  printf '%s\n' "$line"
+  if [[ -n "${REPORT_FILE:-}" ]]; then
+    strip_ansi "$line" >> "$REPORT_FILE"
+    printf '\n' >> "$REPORT_FILE"
+  fi
 }
 
-subsection() {
-  echo
-  echo "${C_BLUE}▸${C_RESET} ${C_BOLD}$*${C_RESET}"
-  echo "${C_DIM}  ························································${C_RESET}"
+log()  { emit "$*"; }
+logv() {
+  [[ "${VERBOSE:-0}" == "1" ]] || return 0
+  local line="${C_DIM}$*${C_RESET}"
+  printf '%s\n' "$line" >&2
+  if [[ -n "${REPORT_FILE:-}" ]]; then
+    strip_ansi "$line" >> "$REPORT_FILE"
+    printf '\n' >> "$REPORT_FILE"
+  fi
+}
+loge() {
+  local line="${C_RED}$*${C_RESET}"
+  printf '%s\n' "$line" >&2
+  if [[ -n "${REPORT_FILE:-}" ]]; then
+    strip_ansi "$line" >> "$REPORT_FILE"
+    printf '\n' >> "$REPORT_FILE"
+  fi
+}
+logi() { emit "${C_CYAN}$*${C_RESET}"; }
+
+_json_escape() {
+  local s=${1-}
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
 }
 
-kv() {
-  # kv "key" "value"
-  local key="$1"
-  local value="$2"
-  printf "  ${C_DIM}%-22s${C_RESET} %s\n" "$key" "$value"
+init_result_store() {
+  _RESULTS_FILE="$(mktemp "${TMPDIR:-/tmp}/kafkaha-results.XXXXXX")"
+  _RECORD_LOCK="$(mktemp "${TMPDIR:-/tmp}/kafkaha-lock.XXXXXX")"
+  _MAX_SEV_FILE="$(mktemp "${TMPDIR:-/tmp}/kafkaha-sev.XXXXXX")"
+  : > "$_RESULTS_FILE"
+  : > "$_RECORD_LOCK"
+  : > "${_RESULTS_FILE}.json"
+  echo 0 > "$_MAX_SEV_FILE"
 }
 
-badge() {
-  local level
-  level="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
-  case "$level" in
-    OK) echo -n "${C_GREEN}${C_BOLD}[OK]${C_RESET}" ;;
-    WATCH|WARN|TIGHT) echo -n "${C_YELLOW}${C_BOLD}[${level}]${C_RESET}" ;;
-    CRITICAL|ERROR|FAIL) echo -n "${C_RED}${C_BOLD}[${level}]${C_RESET}" ;;
-    *) echo -n "${C_GRAY}${C_BOLD}[${level}]${C_RESET}" ;;
+cleanup_result_store() {
+  rm -f "${_RESULTS_FILE:-}" "${_RESULTS_FILE:-}.json" "${_RECORD_LOCK:-}" "${_MAX_SEV_FILE:-}"
+}
+
+_CLEANED_UP=0
+
+# Tear down workers + temp state. Safe to call more than once.
+cleanup_all() {
+  [[ "${_CLEANED_UP}" == "1" ]] && return 0
+  _CLEANED_UP=1
+  # Stop background checks before removing mux sockets / temp files
+  if declare -F kill_parallel_jobs >/dev/null 2>&1; then
+    kill_parallel_jobs
+  fi
+  if declare -F cleanup_ssh_status_store >/dev/null 2>&1; then
+    cleanup_ssh_status_store
+  fi
+  if declare -F cleanup_parallel_store >/dev/null 2>&1; then
+    cleanup_parallel_store
+  fi
+  cleanup_result_store
+}
+
+# Ctrl+C / SIGTERM: stop every local worker (and their ssh children) immediately.
+on_interrupt() {
+  local sig="${1:-INT}"
+  _ABORTING=1
+  printf '\n' >&2
+  loge "Caught ${sig} — stopping all background checks..."
+  cleanup_all
+  case "$sig" in
+    TERM) exit 143 ;;
+    *) exit 130 ;;
   esac
 }
 
-status_line() {
-  # status_line OK "message"
-  local level="$1"; shift
-  echo "  $(badge "$level") $*"
+install_interrupt_traps() {
+  _CLEANED_UP=0
+  trap 'on_interrupt INT' INT
+  trap 'on_interrupt TERM' TERM
+  trap 'cleanup_all' EXIT
 }
 
-info()  { echo "  ${C_BLUE}ℹ${C_RESET} ${C_DIM}$*${C_RESET}"; }
-ok()    { status_line OK "$*"; }
-warn()  { status_line WARN "$*"; }
-err()   { status_line ERROR "$*"; }
-bullet(){ echo "  ${C_CYAN}•${C_RESET} $*"; }
+# record_check — flock-safe for parallel workers
+record_check() {
+  local category="$1" name="$2" status="$3" message="$4" detail="${5-}"
+  local sev=0 color="$C_GREEN"
+  case "$status" in
+    PASS) sev=0; color="$C_GREEN" ;;
+    WARN) sev=1; color="$C_YELLOW" ;;
+    SLOW) sev=1; color="$C_MAGENTA" ;;
+    FAIL) sev=2; color="$C_RED" ;;
+    SKIP|INFO) sev=0; color="$C_BLUE" ;;
+    *) sev=1; color="$C_YELLOW" ;;
+  esac
 
-step_banner() {
-  # step_banner 3 11 "03_cluster_health.sh"
-  local idx="$1" total="$2" name="$3"
-  echo
-  echo "${C_MAGENTA}┏━━${C_RESET} ${C_BOLD}Step ${idx}/${total}${C_RESET}  ${C_DIM}${name}${C_RESET}"
-  echo "${C_MAGENTA}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-}
+  local badge line
+  printf -v badge '%-4s' "$status"
+  line="  ${color}${badge}${C_RESET}  [${category}] ${name} — ${message}"
 
-have() {
-  command -v "$1" >/dev/null 2>&1
-}
-
-require_cmd() {
-  local c
-  for c in "$@"; do
-    if ! have "$c"; then
-      err "required command not found: $c"
-      return 1
+  _do_write() {
+    if [[ -n "${_RESULTS_FILE:-}" ]]; then
+      printf '%s\n' "${status}|${category}|${name}|${message}" >> "${_RESULTS_FILE}"
     fi
+    if [[ -n "${_MAX_SEV_FILE:-}" ]]; then
+      local cur
+      cur=$(cat "${_MAX_SEV_FILE}" 2>/dev/null || echo 0)
+      if (( sev > cur )); then
+        echo "$sev" > "${_MAX_SEV_FILE}"
+      fi
+    fi
+    printf '%s\n' "$line"
+    if [[ -n "${REPORT_FILE:-}" ]]; then
+      strip_ansi "$line" >> "$REPORT_FILE"
+      printf '\n' >> "$REPORT_FILE"
+    fi
+    if [[ -n "$detail" && "${VERBOSE:-0}" == "1" ]]; then
+      local dline="         ${C_DIM}${detail}${C_RESET}"
+      printf '%s\n' "$dline"
+      if [[ -n "${REPORT_FILE:-}" ]]; then
+        strip_ansi "$dline" >> "$REPORT_FILE"
+        printf '\n' >> "$REPORT_FILE"
+      fi
+    fi
+    if [[ "${JSON_OUT:-0}" == "1" && -n "${_RESULTS_FILE:-}" ]]; then
+      printf '%s\n' "{\"category\":\"$(_json_escape "$category")\",\"name\":\"$(_json_escape "$name")\",\"status\":\"$status\",\"message\":\"$(_json_escape "$message")\",\"detail\":\"$(_json_escape "$detail")\"}" >> "${_RESULTS_FILE}.json"
+    fi
+  }
+
+  if [[ -n "${_RECORD_LOCK:-}" && -f "${_RECORD_LOCK}" ]]; then
+    exec 9>>"${_RECORD_LOCK}"
+    flock -x 9
+    _do_write
+    flock -u 9
+    exec 9>&-
+  else
+    _do_write
+  fi
+}
+
+load_severity_from_store() {
+  if [[ -n "${_MAX_SEV_FILE:-}" && -f "${_MAX_SEV_FILE}" ]]; then
+    _MAX_SEVERITY=$(cat "${_MAX_SEV_FILE}")
+  fi
+}
+
+section() {
+  emit ""
+  emit "${C_BOLD}== $* ==${C_RESET}"
+}
+
+csv_to_array() {
+  local -n _out=$1
+  local csv="$2"
+  _out=()
+  local IFS=','
+  local item
+  for item in $csv; do
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    [[ -n "$item" ]] && _out+=("$item")
   done
 }
 
-kafka_tool() {
-  local tool="$1"
-  shift
-  local path="$KAFKA_BIN/$tool"
-  if [[ ! -x "$path" ]]; then
-    err "Kafka tool not found or not executable: $path"
-    return 1
+join_by() {
+  local delim="$1"; shift
+  local first=1 e
+  for e in "$@"; do
+    if (( first )); then printf '%s' "$e"; first=0; else printf '%s%s' "$delim" "$e"; fi
+  done
+}
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# TCP / telnet-style port probe
+tcp_check() {
+  local host="$1" port="$2" to="${3:-${TCP_TIMEOUT_SEC:-3}}"
+  if have_cmd nc; then
+    nc -z -w "$to" "$host" "$port" >/dev/null 2>&1 && return 0
   fi
-  "$path" "$@"
-}
-
-kafka_admin() {
-  local tool="$1"
-  shift
-  local args=("--bootstrap-server" "$KAFKA_BOOTSTRAP")
-  if [[ -f "$KAFKA_COMMAND_CONFIG" ]]; then
-    args+=("--command-config" "$KAFKA_COMMAND_CONFIG")
+  if timeout "$to" bash -c "echo >/dev/tcp/${host}/${port}" >/dev/null 2>&1; then
+    return 0
   fi
-  kafka_tool "$tool" "${args[@]}" "$@"
+  if have_cmd telnet; then
+    timeout "$to" bash -c "printf 'quit\\n' | telnet ${host} ${port} 2>&1" 2>/dev/null | grep -qiE 'Connected|Escape character' && return 0
+  fi
+  return 1
 }
 
-kafka_admin_local() {
-  local tool="$1"
-  shift
-  kafka_tool "$tool" --bootstrap-server "$KAFKA_BOOTSTRAP_LOCAL" "$@"
+telnet_port_check() {
+  local host="$1" port="$2" to="${3:-${TCP_TIMEOUT_SEC:-3}}"
+  if have_cmd telnet; then
+    timeout "$to" bash -c "printf 'quit\\n' | telnet ${host} ${port} 2>&1" 2>/dev/null | grep -qiE 'Connected|Escape character'
+    return $?
+  fi
+  tcp_check "$host" "$port" "$to"
 }
 
-redact_props() {
-  sed -E 's/(password|secret|key|sasl\.jaas\.config)=.*/\1=***/I'
+now_ms() {
+  local ns
+  ns=$(date +%s%N 2>/dev/null) || { date +%s000; return; }
+  if [[ "$ns" =~ ^[0-9]+$ && ${#ns} -gt 10 ]]; then
+    printf '%s' "$((ns / 1000000))"
+  else
+    printf '%s' "$(( $(date +%s) * 1000 ))"
+  fi
 }
 
-http_ok() {
-  local url="$1"
-  curl -sf -m 5 -o /dev/null "$url"
+prompt_default() {
+  local var_name="$1" prompt="$2" default="$3"
+  local val
+  if [[ -n "${!var_name:-}" ]]; then
+    return 0
+  fi
+  if [[ "${NONINTERACTIVE:-0}" == "1" ]]; then
+    printf -v "$var_name" '%s' "$default"
+    return 0
+  fi
+  read -r -p "${prompt} [${default}]: " val || true
+  if [[ -z "$val" ]]; then
+    printf -v "$var_name" '%s' "$default"
+  else
+    printf -v "$var_name" '%s' "$val"
+  fi
 }
 
-timestamp() {
-  date -Iseconds
+prompt_secret() {
+  local var_name="$1" prompt="$2"
+  local val
+  if [[ -n "${!var_name:-}" ]]; then
+    return 0
+  fi
+  if [[ "${NONINTERACTIVE:-0}" == "1" ]]; then
+    printf -v "$var_name" '%s' ""
+    return 0
+  fi
+  read -r -s -p "${prompt}: " val || true
+  printf '\n'
+  printf -v "$var_name" '%s' "$val"
 }
 
-print_env_summary() {
-  section "Environment"
-  kv "time" "$(timestamp)"
-  kv "host" "$(hostname)"
-  kv "KAFKA_HOME" "$KAFKA_HOME"
-  kv "KAFKA_BIN" "$KAFKA_BIN"
-  kv "server.properties" "$KAFKA_SERVER_PROPERTIES"
-  kv "command-config" "$KAFKA_COMMAND_CONFIG"
-  kv "bootstrap" "$KAFKA_BOOTSTRAP"
-  kv "bootstrap.local" "$KAFKA_BOOTSTRAP_LOCAL"
-  kv "log.dirs" "$KAFKA_LOG_DIR"
-  kv "systemd unit" "$KAFKA_SYSTEMD_UNIT"
-  kv "JMX metrics" "$KAFKA_JMX_METRICS_URL"
-  kv "Jolokia" "$KAFKA_JOLOKIA_URL"
-  kv "REPORT_DIR" "$REPORT_DIR"
+bytes_human() {
+  local b=${1:-0}
+  if (( b < 1024 )); then printf '%dB' "$b"
+  elif (( b < 1048576 )); then printf '%dKiB' "$((b/1024))"
+  elif (( b < 1073741824 )); then printf '%dMiB' "$((b/1048576))"
+  else printf '%dGiB' "$((b/1073741824))"
+  fi
+}
+
+float_ge() {
+  awk -v a="$1" -v b="$2" 'BEGIN { exit !(a+0 >= b+0) }'
+}
+
+slugify() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g'
+}
+
+# port in CSV list?
+port_in_list() {
+  local port="$1" csv="$2"
+  [[ -z "$csv" ]] && return 1
+  printf ',%s,' "$csv" | grep -q ",${port},"
+}
+
+is_checker_reachable_port() {
+  local port="$1"
+  if [[ -n "${CHECKER_REACHABLE_PORTS:-}" ]]; then
+    port_in_list "$port" "$CHECKER_REACHABLE_PORTS"
+    return $?
+  fi
+  return 0
+}
+
+is_cluster_internal_port() {
+  local port="$1"
+  port_in_list "$port" "${CLUSTER_INTERNAL_PORTS:-}"
+}
+
+init_report_file() {
+  local override="${1-}"
+  local dir="${REPORT_DIR:-}"
+  if [[ -z "$dir" ]]; then
+    dir="${ROOT_DIR:-.}/reports"
+  fi
+  mkdir -p "$dir"
+  if [[ -n "$override" ]]; then
+    REPORT_FILE="$override"
+  else
+    local slug
+    slug=$(slugify "${CLUSTER_NAME:-cluster}")
+    REPORT_FILE="${dir}/kafkaha-${slug}-$(date +%Y%m%d-%H%M%S).log"
+  fi
+  {
+    echo "Kafka HA Health Check v${SCRIPT_VERSION}"
+    echo "Cluster: ${CLUSTER_NAME:-unknown}"
+    echo "Config:  ${CONFIG_FILE:-}"
+    echo "Started: $(date -Is)"
+    echo "----------------------------------------"
+  } > "$REPORT_FILE"
+  logi "Report file: ${REPORT_FILE}"
 }

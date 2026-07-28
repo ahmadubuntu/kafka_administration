@@ -1,0 +1,31 @@
+---
+description: Mirror GitHub changes to Azure DevOps DataPlatform
+alwaysApply: true
+---
+
+# Dual Git remotes
+
+This repository is mirrored to two remotes:
+
+- `origin`: `https://github.com/ahmadubuntu/kafka_administration.git`
+- `azure`: `https://azure.charisma.tech/DataPlatform/DataPlatform/_git/kafka_administration`
+
+Keep `main` tracking `origin/main`. After pushing a release or commit to
+GitHub, mirror the branch and tags to Azure.
+
+Use `AZDO_PAT_DATAPLATFORM` for Azure authentication. Never use `AZDO_PAT`,
+print the token, commit it, or embed it in a remote URL.
+
+```bash
+AUTH_HEADER="AUTHORIZATION: Basic $(printf ':%s' "$AZDO_PAT_DATAPLATFORM" | base64 -w0)"
+git -c credential.helper= -c http.extraHeader="$AUTH_HEADER" push azure main
+git -c credential.helper= -c http.extraHeader="$AUTH_HEADER" push azure --tags
+git branch --set-upstream-to=origin/main main
+```
+
+For read-only verification:
+
+```bash
+AUTH_HEADER="AUTHORIZATION: Basic $(printf ':%s' "$AZDO_PAT_DATAPLATFORM" | base64 -w0)"
+git -c credential.helper= -c http.extraHeader="$AUTH_HEADER" ls-remote azure
+```
