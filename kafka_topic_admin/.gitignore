@@ -1,0 +1,4 @@
+reports/
+config/clusters/*.env
+!config/clusters/*.example.env
+.DS_Store

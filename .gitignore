@@ -6,4 +6,10 @@ kafka_realtime_check/**/*.pyc
 kafka_realtime_check/**/*.prom
 kafka_realtime_check/config/clusters/*.env
 !kafka_realtime_check/config/clusters/*.example.env
+
+# kafka_topic_admin
+kafka_topic_admin/reports/
+kafka_topic_admin/config/clusters/*.env
+!kafka_topic_admin/config/clusters/*.example.env
+
 .DS_Store
