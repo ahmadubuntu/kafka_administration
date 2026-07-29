@@ -26,6 +26,8 @@ source "${ROOT_DIR}/lib/ssh.sh"
 source "${ROOT_DIR}/lib/kafka_cluster.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/tasks.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/entity_filter.sh"
 
 CONFIG_FILE=""
 FIND_RF="1,2"
@@ -40,8 +42,7 @@ VERBOSE=0
 LIST_FILE=""
 JSON_OUT=""
 THROTTLE=""
-INCLUDE_INTERNAL=0
-EXCLUDE_REGEX=""
+JOBS_ARG="8"
 ADMIN_BROKER_HOST=""
 _ALL_KAFKA_HOSTS=()
 
@@ -50,8 +51,8 @@ TASK_CATALOG=(
   "scan|ssh|Scan topics by replication factor|scan,find,list"
   "reassign|ssh|Build / execute RF reassignment|reassign,apply,replication"
 )
-TASKS_LIST_EXAMPLES="  $(basename "$0") -c CONFIG.env --find 1,2 --set 3
-  $(basename "$0") -c CONFIG.env -y --find 1,2 --set 3 --apply
+TASKS_LIST_EXAMPLES="  $(basename "$0") -c CONFIG.env --find 1,2 --set 3 --pattern '^prod-'
+  $(basename "$0") -c CONFIG.env -y --find 1,2 --set 3 --apply --jobs 8
   $(basename "$0") -c CONFIG.env --only scan --find 1
   $(basename "$0") -c CONFIG.env --ask-tasks"
 
@@ -73,8 +74,7 @@ Options:
   --apply                 Execute reassignment (default: scan + write plan only)
   --no-verify             Skip --verify after --apply
   --throttle BYTES        Optional reassignment throttle (bytes/sec)
-  --include-internal      Include topics starting with '__'
-  --exclude REGEX         Drop matching topic names (ERE)
+$(entity_filter_help_lines)
   --json-out FILE         Write reassignment JSON here (default: reports/…)
   -o, --out FILE          Write matching topic names (one per line)
   --only TASKS            ssh, scan, reassign
@@ -99,8 +99,10 @@ parse_args() {
       --apply) APPLY=1; shift ;;
       --no-verify) VERIFY=0; shift ;;
       --throttle) THROTTLE="$2"; shift 2 ;;
+      --jobs) JOBS_ARG="$2"; shift 2 ;;
+      --pattern|--include|--topic-pattern) entity_filter_add_pattern "$2"; shift 2 ;;
+      --exclude|--exclude-pattern) entity_filter_add_exclude "$2"; shift 2 ;;
       --include-internal) INCLUDE_INTERNAL=1; shift ;;
-      --exclude) EXCLUDE_REGEX="$2"; shift 2 ;;
       --json-out) JSON_OUT="$2"; shift 2 ;;
       --only) ONLY_TASKS="$2"; shift 2 ;;
       --skip) SKIP_TASKS="$2"; shift 2 ;;
@@ -524,16 +526,11 @@ main() {
       loge "Empty topics --describe — check bootstrap/SASL/command-config"; exit 2
     fi
 
-    local total=0
+    local total=0 filtered_out=0
     while IFS=$'\t' read -r topic rf; do
       [[ -z "$topic" || -z "$rf" ]] && continue
       total=$((total + 1))
-      if [[ "$INCLUDE_INTERNAL" != "1" && "$topic" == __* ]]; then
-        continue
-      fi
-      if [[ -n "$EXCLUDE_REGEX" ]] && [[ "$topic" =~ $EXCLUDE_REGEX ]]; then
-        continue
-      fi
+      name_matches_filter "$topic" || { filtered_out=$((filtered_out + 1)); continue; }
       if _rf_in_find "$rf"; then
         if (( rf >= SET_VAL )); then
           [[ "$VERBOSE" == "1" ]] && emit "  skip ${topic} RF=${rf} (already >= ${SET_VAL})"
@@ -545,7 +542,8 @@ main() {
       fi
     done < <(printf '%s\n' "$desc" | _parse_topic_rf_summary)
 
-    emit "Topics with RF summary line: ${total}"
+    entity_filter_summary
+    emit "Topics with RF summary line: ${total}  filter-dropped: ${filtered_out}"
     emit "Matches (RF in {${FIND_RF}} and RF < ${SET_VAL}): ${match}"
 
     if (( match == 0 )); then

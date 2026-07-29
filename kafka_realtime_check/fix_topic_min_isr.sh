@@ -27,6 +27,8 @@ source "${ROOT_DIR}/lib/ssh.sh"
 source "${ROOT_DIR}/lib/kafka_cluster.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/tasks.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/entity_filter.sh"
 
 CONFIG_FILE=""
 FIND_VAL=1
@@ -38,12 +40,14 @@ SUDO_PASSWORD_ENV="${SUDO_PASSWORD:-${SUDO_PASSWORD_ENV:-}}"
 USE_SUDO=1
 VERBOSE=0
 LIST_FILE=""
-JOBS_ARG="ask"   # ask | auto | <int>
+JOBS_ARG="8"   # default parallel workers
+SKIP_RF_CHECK=0
 _ALTER_OK_FILE=""
 _ALTER_FAIL_FILE=""
 _ALTER_LOCK=""
 _ALTER_VALUE=""
 _ALTER_BROKERS=()
+_RF_SKIPPED=0
 
 # id|prereqs|title|aliases
 TASK_CATALOG=(
@@ -52,7 +56,7 @@ TASK_CATALOG=(
   "topics|ssh|Topic scan / alter|topics,topic,topic scan,topic alter"
 )
 TASKS_LIST_EXAMPLES="  $(basename "$0") -c CONFIG.env --only cluster
-  $(basename "$0") -c CONFIG.env --only topics --find 1 --set 2
+  $(basename "$0") -c CONFIG.env --only topics --find 1 --set 2 --pattern '^prod-'
   $(basename "$0") -c CONFIG.env --skip topics
   $(basename "$0") -c CONFIG.env --ask-tasks"
 
@@ -68,11 +72,11 @@ Options:
   --find N            Topics whose effective min.insync.replicas == N (default: 1)
   --set N             Target value (default: ask interactively, or 2 with -y)
   --apply             Apply changes (cluster default + matching topics)
-  --jobs N|auto|ask   Parallel topic alters (default: ask; suggested range 8–32)
+$(entity_filter_help_lines)
+  --skip-rf-check     Do not skip topics whose ReplicationFactor < --set
   --only TASKS        Run only these tasks (ssh, cluster, topics)
-  --skip TASKS        Skip these tasks
-  --ask-tasks         Interactive task picker
-  --list-tasks        List tasks and exit
+  --skip TASKS
+  --ask-tasks / --list-tasks
   --skip-cluster      Alias for --skip cluster
   --skip-topics       Alias for --skip topics
   -o, --out FILE      Write matching topic names to FILE
@@ -80,9 +84,8 @@ Options:
   -v, --verbose       Verbose alter failures
   -h, --help
 
-Without --apply: report only (safe). Kafka is never restarted; live default uses
-  kafka-configs.sh --entity-type brokers --entity-default --alter
-plus an in-place edit of server.properties on each node for persistence.
+Safety: topics with ReplicationFactor < --set are skipped (min.isr cannot exceed RF)
+unless --skip-rf-check. Without --apply: report only (safe).
 EOF
 }
 
@@ -95,6 +98,10 @@ parse_args() {
       --set) SET_VAL="$2"; shift 2 ;;
       --apply) APPLY=1; shift ;;
       --jobs) JOBS_ARG="$2"; shift 2 ;;
+      --pattern|--include|--topic-pattern) entity_filter_add_pattern "$2"; shift 2 ;;
+      --exclude|--exclude-pattern) entity_filter_add_exclude "$2"; shift 2 ;;
+      --include-internal) INCLUDE_INTERNAL=1; shift ;;
+      --skip-rf-check) SKIP_RF_CHECK=1; shift ;;
       --only) ONLY_TASKS="$2"; shift 2 ;;
       --skip) SKIP_TASKS="$2"; shift 2 ;;
       --ask-tasks) ASK_TASKS=1; shift ;;
@@ -367,54 +374,35 @@ _remote_alter_topic_isr() {
   _remote_run_script "$host" 0 "$remote_cmd"
 }
 
-_pick_jobs() {
-  local n_topics="${1:-0}"
-  local suggested
-  if (( n_topics <= 0 )); then
-    suggested=8
-  elif (( n_topics < 50 )); then
-    suggested=8
-  elif (( n_topics < 200 )); then
-    suggested=16
-  elif (( n_topics < 500 )); then
-    suggested=24
-  else
-    suggested=32
-  fi
-  # clamp
-  (( suggested < 4 )) && suggested=4
-  (( suggested > 48 )) && suggested=48
-
-  case "$JOBS_ARG" in
-    auto)
-      PARALLEL_JOBS="$suggested"
-      ;;
-    ask|"")
-      if [[ "$NONINTERACTIVE" == "1" ]]; then
-        PARALLEL_JOBS="$suggested"
-      else
-        local ans=""
-        emit "Suggested parallel workers for ${n_topics} topic(s): ${suggested} (reasonable range 8–32, max 48)."
-        read -r -p "Parallel jobs [${suggested}]: " ans || true
-        if [[ -z "$ans" ]]; then
-          PARALLEL_JOBS="$suggested"
-        elif [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= 64 )); then
-          PARALLEL_JOBS="$ans"
-        else
-          loge "Invalid jobs value: ${ans}"; exit 2
-        fi
-      fi
-      ;;
-    *)
-      if [[ "$JOBS_ARG" =~ ^[0-9]+$ ]] && (( JOBS_ARG >= 1 && JOBS_ARG <= 64 )); then
-        PARALLEL_JOBS="$JOBS_ARG"
-      else
-        loge "--jobs must be ask, auto, or integer 1–64"; exit 2
-      fi
-      ;;
-  esac
-  export PARALLEL_JOBS
-  emit "Using PARALLEL_JOBS=${PARALLEL_JOBS}"
+# stdout: topic<TAB>rf
+_remote_topic_rf_map() {
+  local host="$1"
+  local bootstrap="${KAFKA_CONNECT_BOOTSTRAP:-${KAFKA_BOOTSTRAP:-}}"
+  local conf="${KAFKA_COMMAND_CONFIG:-}"
+  local bin="${KAFKA_BIN:-/opt/kafka/bin}"
+  local remote_cmd
+  remote_cmd=$(cat <<REMOTE
+set -euo pipefail
+BIN='${bin}'; BOOT='${bootstrap}'; CONF='${conf}'
+$(_kafka_admin_args_remote)
+timeout ${KAFKA_ADMIN_TIMEOUT_SEC:-300} "\$BIN/kafka-topics.sh" "\${ARGS[@]}" --describe 2>/dev/null \
+  | awk '
+    /^Topic:/ && /ReplicationFactor:/ {
+      topic=""; rf="";
+      if (match(\$0, /Topic:[[:space:]]*[^[:space:]]+/)) {
+        topic=substr(\$0, RSTART, RLENGTH);
+        sub(/^Topic:[[:space:]]*/, "", topic);
+      }
+      if (match(\$0, /ReplicationFactor:[[:space:]]*[0-9]+/)) {
+        rf=substr(\$0, RSTART, RLENGTH);
+        sub(/^ReplicationFactor:[[:space:]]*/, "", rf);
+      }
+      if (topic != "" && rf != "") printf "%s\\t%s\\n", topic, rf;
+    }
+  '
+REMOTE
+)
+  _remote_run_script "$host" 0 "$remote_cmd"
 }
 
 _confirm() {
@@ -610,45 +598,75 @@ main() {
     loge "--set must be integer >= 1"; exit 2
   fi
 
+  entity_filter_summary
   section "Scan topics (effective min.insync.replicas)"
-  local scan_out
+  local scan_out rf_out
   scan_out="$(_remote_scan_min_isr "$broker")" || true
   if [[ -z "${scan_out// }" ]]; then
     loge "Empty topic scan — check bootstrap/SASL/command-config"
     exit 2
   fi
 
-  local total=0 match=0
-  local -a matches=()
-  local topic val
+  declare -A TOPIC_RF=()
+  rf_out="$(_remote_topic_rf_map "$broker" 2>/dev/null || true)"
+  local rf_topic rf_val
+  while IFS=$'\t' read -r rf_topic rf_val; do
+    [[ -z "$rf_topic" || -z "$rf_val" ]] && continue
+    TOPIC_RF["$rf_topic"]="$rf_val"
+  done <<<"$rf_out"
+
+  local total=0 match=0 filtered_out=0 rf_skip=0
+  local -a matches=() match_notes=()
+  local topic val rf
+  _RF_SKIPPED=0
   while IFS=$'\t' read -r topic val; do
     [[ -z "$topic" ]] && continue
     total=$((total + 1))
-    if [[ "$val" == "$FIND_VAL" ]]; then
-      match=$((match + 1))
-      matches+=("$topic")
+    name_matches_filter "$topic" || { filtered_out=$((filtered_out + 1)); continue; }
+    [[ "$val" == "$FIND_VAL" ]] || continue
+
+    rf="${TOPIC_RF[$topic]:-}"
+    if [[ "$SKIP_RF_CHECK" != "1" ]]; then
+      if [[ -z "$rf" ]]; then
+        emit "  ${C_YELLOW}WARN${C_RESET} ${topic} — RF unknown; skipping (use --skip-rf-check to force)"
+        rf_skip=$((rf_skip + 1))
+        _RF_SKIPPED=$((_RF_SKIPPED + 1))
+        continue
+      fi
+      if (( rf < SET_VAL )); then
+        emit "  ${C_YELLOW}SKIP${C_RESET} ${topic} — RF=${rf} < min.isr target ${SET_VAL} (Kafka rejects min.isr > RF)"
+        rf_skip=$((rf_skip + 1))
+        _RF_SKIPPED=$((_RF_SKIPPED + 1))
+        continue
+      fi
+      if (( rf == SET_VAL )); then
+        match_notes+=("RF=${rf}(=min.isr) ${topic}")
+      else
+        match_notes+=("RF=${rf} ${topic}")
+      fi
+    else
+      match_notes+=("RF=${rf:-?} ${topic}")
     fi
+    match=$((match + 1))
+    matches+=("$topic")
   done <<<"$scan_out"
 
-  emit "Topics scanned: ${total}"
-  emit "Matches (effective min.insync.replicas=${FIND_VAL}): ${match}"
+  emit "Topics scanned: ${total}  filter-dropped: ${filtered_out}  rf-skipped: ${rf_skip}"
+  emit "Matches (min.isr=${FIND_VAL} → ${SET_VAL}, after filters): ${match}"
 
   if (( match == 0 )); then
-    emit "${C_GREEN}No topics still at ${FIND_VAL}.${C_RESET}"
+    emit "${C_GREEN}No topics to alter (after pattern/RF filters).${C_RESET}"
     exit 0
   fi
 
   section "Matching topics (${match})"
-  local t
-  if (( match <= 40 )) || [[ "$VERBOSE" == "1" ]]; then
-    for t in "${matches[@]}"; do emit "  ${t}"; done
-  else
-    local i=0
-    for t in "${matches[@]}"; do
-      emit "  ${t}"
-      i=$((i + 1))
-      (( i >= 20 )) && break
-    done
+  local i
+  for i in "${!matches[@]}"; do
+    if (( match <= 40 )) || [[ "$VERBOSE" == "1" ]] || (( i < 20 )); then
+      emit "  ${match_notes[$i]}"
+    fi
+  done
+  if (( match > 40 )) && [[ "$VERBOSE" != "1" ]]; then
     emit "  … and $((match - 20)) more (use -v to print all, or -o FILE)"
   fi
 
@@ -659,7 +677,7 @@ main() {
 
   if [[ "$APPLY" != "1" ]]; then
     emit ""
-    emit "${C_YELLOW}Scan only for topics. Re-run with --apply --set ${SET_VAL} to alter them in parallel.${C_RESET}"
+    emit "${C_YELLOW}Scan only for topics. Re-run with --apply --set ${SET_VAL} --jobs ${JOBS_ARG} to alter in parallel.${C_RESET}"
     exit 0
   fi
 
@@ -669,7 +687,7 @@ main() {
   fi
 
   section "Parallel topic alter → ${SET_VAL}"
-  _pick_jobs "$match"
+  resolve_parallel_jobs "$match"
   if ! _confirm "Alter ${match} topic(s) to min.insync.replicas=${SET_VAL} with ${PARALLEL_JOBS} workers?"; then
     emit "Aborted — no topic changes."
     exit 0
@@ -698,7 +716,7 @@ main() {
   rm -f "$_ALTER_OK_FILE" "$_ALTER_FAIL_FILE" "$_ALTER_LOCK"
 
   emit ""
-  emit "Topic alters done: ok=${ok} fail=${fail} (target=${SET_VAL}, jobs=${PARALLEL_JOBS})"
+  emit "Topic alters done: ok=${ok} fail=${fail} rf_skipped=${_RF_SKIPPED} (target=${SET_VAL}, jobs=${PARALLEL_JOBS})"
   (( fail == 0 )) || exit 2
   exit 0
 }

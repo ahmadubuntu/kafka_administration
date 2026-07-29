@@ -28,6 +28,8 @@ source "${ROOT_DIR}/lib/os_security.sh"
 source "${ROOT_DIR}/lib/report.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/tasks.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/entity_filter.sh"
 
 CONFIG_FILE=""
 VERBOSE=0
@@ -38,6 +40,7 @@ NONINTERACTIVE=0
 REPORT_FILE_OVERRIDE=""
 SSH_USER_OVERRIDE="${SSH_USER_OVERRIDE:-}"
 SUDO_PASSWORD_ENV="${SUDO_PASSWORD:-${SUDO_PASSWORD_ENV:-}}"
+JOBS_ARG="${JOBS_ARG:-8}"
 
 # id|prereqs|title|aliases
 TASK_CATALOG=(
@@ -98,6 +101,7 @@ Options:
   --ask-tasks           Interactively pick tasks before running
   --list-tasks          List task ids / titles / aliases and exit
   --skip-lag            Skip consumer-group lag describe
+$(entity_filter_help_lines)
   --json                Emit JSON summary at end
   -o, --report FILE     Write report to FILE (default: reports/kafkaha-*.log)
   -v, --verbose         Verbose details
@@ -106,7 +110,7 @@ Options:
 
 Examples:
   $(basename "$0") -c config/clusters/dmzkafka.env -u USER -y --only os
-  $(basename "$0") -c config/clusters/dmzkafka.env --only "OS health & security,ports"
+  $(basename "$0") -c config/clusters/dmzkafka.env --only lag --pattern '^prod-' --jobs 8
   $(basename "$0") -c config/clusters/dmzkafka.env --ask-tasks
 
 Exit codes: 0=PASS, 1=WARN/SLOW, 2=FAIL
@@ -125,6 +129,10 @@ parse_args() {
       --ask-tasks) ASK_TASKS=1; shift ;;
       --list-tasks) LIST_TASKS=1; shift ;;
       --skip-lag) SKIP_LAG=1; shift ;;
+      --jobs) JOBS_ARG="$2"; shift 2 ;;
+      --pattern|--include|--topic-pattern|--group-pattern) entity_filter_add_pattern "$2"; shift 2 ;;
+      --exclude|--exclude-pattern) entity_filter_add_exclude "$2"; shift 2 ;;
+      --include-internal) INCLUDE_INTERNAL=1; shift ;;
       --json) JSON_OUT=1; shift ;;
       -o|--report) REPORT_FILE_OVERRIDE="$2"; shift 2 ;;
       -v|--verbose) VERBOSE=1; shift ;;
@@ -222,9 +230,11 @@ main() {
   emit "${C_BOLD}Kafka HA Health Check v${SCRIPT_VERSION}${C_RESET} — ${CLUSTER_NAME:-cluster}"
   emit "Config: ${CONFIG_FILE}"
   emit "Time:   $(date -Is)"
+  resolve_parallel_jobs 0
   emit "Parallel jobs: ${PARALLEL_JOBS:-8}"
 
   tasks_select || exit $?
+  entity_filter_summary
   prompt_credentials
 
   set +e

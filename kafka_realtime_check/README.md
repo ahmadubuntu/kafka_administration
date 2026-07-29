@@ -52,13 +52,14 @@ Reports: `reports/kafkaha-<slug>-<timestamp>.log`.
 
 ```bash
 ./fix_topic_min_isr.sh -c config/clusters/stgkafka.env -u "$USER" -y --set 2
-./fix_topic_min_isr.sh -c config/clusters/stgkafka.env -u "$USER" --find 1 --set 2 --apply --jobs ask
-./fix_topic_min_isr.sh -c config/clusters/stgkafka.env -u "$USER" -y --only cluster
-./fix_topic_min_isr.sh -c config/clusters/stgkafka.env -u "$USER" -y --only topics --find 1 --set 2
+./fix_topic_min_isr.sh -c config/clusters/stgkafka.env -u "$USER" --find 1 --set 2 --apply --jobs 8
+./fix_topic_min_isr.sh -c config/clusters/stgkafka.env -u "$USER" -y --only topics --find 1 --set 2 --pattern '^prod-'
 ./fix_topic_min_isr.sh --list-tasks
 ```
 
-`--skip-cluster` / `--skip-topics` remain as aliases for `--skip cluster` / `--skip topics`.
+Topics with `ReplicationFactor < --set` are **skipped** (Kafka rejects `min.isr > RF`). Override with `--skip-rf-check` only if you know what you are doing.
+
+Shared filters (topics & consumer groups): `--pattern REGEX`, `--exclude REGEX`, `--include-internal`, `--jobs N|auto|ask` (default **8**).
 
 ## Topic replication factor
 
@@ -118,6 +119,7 @@ fix_topic_replication.sh
 run_admin_suite.sh         # deep broker admin (was run_all.sh)
 run_via_ssh.sh
 lib/tasks.sh               # shared --only/--skip/--ask-tasks
+lib/entity_filter.sh       # shared --pattern/--exclude/--jobs
 VERSION
 ARCHITECTURE.md
 config/clusters/*.example.env

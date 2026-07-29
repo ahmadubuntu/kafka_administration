@@ -245,50 +245,86 @@ check_kafka_consumer_lag() {
     record_check "lag" "list" "WARN" "cannot list groups (rc=${rc})" "$groups_out"
     return
   fi
-  local gcount
-  gcount="$(echo "$groups_out" | grep -cve '^$' || true)"
-  record_check "lag" "group-count" "INFO" "consumer groups=${gcount}"
 
-  local desc rc2=0
-  # --describe --all-groups can be heavy; allow timeout
-  desc="$(_kafka_run kafka-consumer-groups.sh --describe --all-groups 2>&1)" || rc2=$?
-  if [[ $rc2 -ne 0 ]]; then
-    record_check "lag" "describe" "WARN" "describe --all-groups failed/timeout (rc=${rc2}) — try raising KAFKA_ADMIN_TIMEOUT_SEC" "$desc"
+  local -a groups=()
+  local g filtered=0
+  while IFS= read -r g; do
+    g="${g//$'\r'/}"
+    [[ -z "$g" ]] && continue
+    if declare -F name_matches_filter >/dev/null 2>&1; then
+      if ! name_matches_filter "$g"; then
+        filtered=$((filtered + 1))
+        continue
+      fi
+    fi
+    groups+=("$g")
+  done <<<"$groups_out"
+
+  record_check "lag" "group-count" "INFO" "listed=$(( ${#groups[@]} + filtered )) selected=${#groups[@]} filter-dropped=${filtered}"
+
+  if ((${#groups[@]} == 0)); then
+    record_check "lag" "describe" "INFO" "no consumer groups matched filter"
     return
   fi
 
-  # Parse LAG column (kafka-consumer-groups table). Sum numeric lags; ignore '-'.
-  local max_lag=0 sum_lag=0 bad=0
-  while read -r lag; do
-    [[ "$lag" =~ ^[0-9]+$ ]] || continue
-    sum_lag=$((sum_lag + lag))
-    (( lag > max_lag )) && max_lag=$lag
-    if (( lag >= ${LAG_FAIL:-100000} )); then
-      bad=$((bad + 1))
-    fi
-  done < <(echo "$desc" | awk 'NR>1 {print $(NF-1)}' 2>/dev/null; echo "$desc" | awk 'toupper($0) ~ /LAG/ {next} {for(i=1;i<=NF;i++) if($i+0==$i && $i!~/\./) print $i}' 2>/dev/null | head -5000)
+  if declare -F resolve_parallel_jobs >/dev/null 2>&1; then
+    resolve_parallel_jobs "${#groups[@]}"
+  else
+    PARALLEL_JOBS="${PARALLEL_JOBS:-8}"
+  fi
+  if declare -F entity_filter_summary >/dev/null 2>&1; then
+    entity_filter_summary
+  fi
 
-  # More reliable: look for "LAG" header and take that column
-  max_lag=0; sum_lag=0; bad=0
-  local lag_col=0
-  while IFS= read -r line; do
-    if echo "$line" | grep -qiE '[[:space:]]LAG[[:space:]]'; then
-      # find LAG field index
-      lag_col="$(echo "$line" | awk '{for(i=1;i<=NF;i++) if(toupper($i)=="LAG") print i; exit}')"
+  local lag_tmp lag_lock
+  lag_tmp="$(mktemp "${TMPDIR:-/tmp}/kafkaha-lag.XXXXXX")"
+  lag_lock="$(mktemp "${TMPDIR:-/tmp}/kafkaha-lag-lock.XXXXXX")"
+  : >"$lag_tmp"
+  : >"$lag_lock"
+
+  _lag_describe_one() {
+    local group="$1" out v lag_col=0 line
+    out="$(_kafka_run kafka-consumer-groups.sh --describe --group "$group" 2>&1)" || {
+      {
+        flock -x 8
+        printf 'ERR\t%s\n' "$group" >>"$lag_tmp"
+      } 8>>"$lag_lock"
+      return 0
+    }
+    while IFS= read -r line; do
+      if echo "$line" | grep -qiE '[[:space:]]LAG[[:space:]]'; then
+        lag_col="$(echo "$line" | awk '{for(i=1;i<=NF;i++) if(toupper($i)=="LAG") print i; exit}')"
+        continue
+      fi
+      [[ "${lag_col:-0}" -gt 0 ]] || continue
+      v="$(echo "$line" | awk -v c="$lag_col" '{print $c}')"
+      [[ "$v" =~ ^[0-9]+$ ]] || continue
+      {
+        flock -x 8
+        printf '%s\t%s\n' "$group" "$v" >>"$lag_tmp"
+      } 8>>"$lag_lock"
+    done <<<"$out"
+  }
+
+  run_parallel_fn _lag_describe_one "${groups[@]}"
+
+  local max_lag=0 sum_lag=0 bad=0 err_n=0
+  local grp val
+  while IFS=$'\t' read -r grp val; do
+    if [[ "$grp" == "ERR" ]]; then
+      err_n=$((err_n + 1))
       continue
     fi
-    [[ "${lag_col:-0}" -gt 0 ]] || continue
-    local v
-    v="$(echo "$line" | awk -v c="$lag_col" '{print $c}')"
-    [[ "$v" =~ ^[0-9]+$ ]] || continue
-    sum_lag=$((sum_lag + v))
-    (( v > max_lag )) && max_lag=$v
-    if (( v >= ${LAG_FAIL:-100000} )); then
+    [[ "$val" =~ ^[0-9]+$ ]] || continue
+    sum_lag=$((sum_lag + val))
+    (( val > max_lag )) && max_lag=$val
+    if (( val >= ${LAG_FAIL:-100000} )); then
       bad=$((bad + 1))
     fi
-  done <<<"$desc"
+  done <"$lag_tmp"
+  rm -f "$lag_tmp" "$lag_lock"
 
-  record_check "lag" "max" "INFO" "max_lag=${max_lag} sum_lag=${sum_lag}"
+  record_check "lag" "max" "INFO" "max_lag=${max_lag} sum_lag=${sum_lag} describe_errors=${err_n} jobs=${PARALLEL_JOBS:-8}"
   if (( max_lag >= ${LAG_FAIL:-100000} )); then
     record_check "lag" "threshold" "FAIL" "max lag ${max_lag} ≥ LAG_FAIL=${LAG_FAIL:-100000} (${bad} partition-rows)"
   elif (( max_lag >= ${LAG_WARN:-10000} )); then
