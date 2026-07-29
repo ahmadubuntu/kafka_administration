@@ -26,6 +26,8 @@ source "${ROOT_DIR}/lib/capacity.sh"
 source "${ROOT_DIR}/lib/os_security.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/report.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/tasks.sh"
 
 CONFIG_FILE=""
 VERBOSE=0
@@ -37,6 +39,50 @@ REPORT_FILE_OVERRIDE=""
 SSH_USER_OVERRIDE="${SSH_USER_OVERRIDE:-}"
 SUDO_PASSWORD_ENV="${SUDO_PASSWORD:-${SUDO_PASSWORD_ENV:-}}"
 
+# id|prereqs|title|aliases
+TASK_CATALOG=(
+  "ssh||SSH connectivity|ssh,ssh connectivity,connectivity"
+  "ports|ssh|Port matrix|ports,port matrix,port-matrix,mesh"
+  "cascade||Client cascade (VIP → LB → broker)|cascade,client cascade,vip cascade"
+  "vip|ssh|VIP ownership|vip,vip ownership,vip-owner"
+  "services|ssh|Kafka systemd units|services,service,systemd,kafka systemd"
+  "membership|ssh|Broker membership vs inventory|membership,brokers,broker membership"
+  "controller|ssh|Controller / KRaft quorum|controller,quorum,kraft,controllers"
+  "partitions|ssh|Partition health (URP / offline / preferred imbalance)|partitions,partition,urp,offline"
+  "disk|ssh|log.dirs disk|disk,logdirs,log.dirs,log dirs"
+  "lag|ssh|Consumer group lag|lag,consumer lag,consumer-group"
+  "config|ssh|Config drift (EXPECT_*)|config,config drift,drift,expect"
+  "capacity|ssh|Capacity (FD / connections / handler idle)|capacity,fd,connections,handler"
+  "os|ssh|OS health & security|os,os health,os health & security,os_security,security,boot"
+)
+TASKS_LIST_EXAMPLES="  $(basename "$0") -c CONFIG.env --only os
+  $(basename "$0") -c CONFIG.env --only \"OS health & security\"
+  $(basename "$0") -c CONFIG.env --only os,ports,cascade
+  $(basename "$0") -c CONFIG.env --skip lag,capacity
+  $(basename "$0") -c CONFIG.env --ask-tasks"
+
+run_selected_tasks() {
+  tasks_selected ssh && run_ssh_sweep
+  tasks_selected ports && run_port_matrix
+  tasks_selected cascade && run_kafka_cascade
+  tasks_selected vip && check_vip_owner
+  tasks_selected services && check_kafka_services
+  tasks_selected membership && check_kafka_membership
+  tasks_selected controller && check_kafka_controller
+  tasks_selected partitions && check_kafka_partition_health
+  tasks_selected disk && check_kafka_disk_logdirs
+  if tasks_selected lag; then
+    if [[ "$SKIP_LAG" == "1" ]]; then
+      record_check "lag" "skipped" "SKIP" "--skip-lag set"
+    else
+      check_kafka_consumer_lag
+    fi
+  fi
+  tasks_selected config && check_kafka_config_drift
+  tasks_selected capacity && check_kafka_capacity
+  tasks_selected os && check_all_os_security
+}
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") -c CONFIG.env [options]
@@ -47,6 +93,10 @@ Options:
   -c, --config FILE     Cluster inventory (.env)
   -u, --user USER       SSH username (skip prompt)
   -n, --no-sudo         Do not use sudo on remotes
+  --only TASKS          Run only these tasks (comma-separated ids or titles)
+  --skip TASKS          Skip these tasks (comma-separated)
+  --ask-tasks           Interactively pick tasks before running
+  --list-tasks          List task ids / titles / aliases and exit
   --skip-lag            Skip consumer-group lag describe
   --json                Emit JSON summary at end
   -o, --report FILE     Write report to FILE (default: reports/kafkaha-*.log)
@@ -54,8 +104,13 @@ Options:
   -y, --yes             Non-interactive (use defaults / env)
   -h, --help            Show help
 
+Examples:
+  $(basename "$0") -c config/clusters/dmzkafka.env -u USER -y --only os
+  $(basename "$0") -c config/clusters/dmzkafka.env --only "OS health & security,ports"
+  $(basename "$0") -c config/clusters/dmzkafka.env --ask-tasks
+
 Exit codes: 0=PASS, 1=WARN/SLOW, 2=FAIL
-Deep single-broker diagnostics remain under ./scripts and ./run_all.sh
+Orchestrator: ./run_all.sh   ·   deep broker admin: ./run_admin_suite.sh
 EOF
 }
 
@@ -65,6 +120,10 @@ parse_args() {
       -c|--config) CONFIG_FILE="$2"; shift 2 ;;
       -u|--user) SSH_USER_OVERRIDE="$2"; shift 2 ;;
       -n|--no-sudo) USE_SUDO=0; shift ;;
+      --only) ONLY_TASKS="$2"; shift 2 ;;
+      --skip) SKIP_TASKS="$2"; shift 2 ;;
+      --ask-tasks) ASK_TASKS=1; shift ;;
+      --list-tasks) LIST_TASKS=1; shift ;;
       --skip-lag) SKIP_LAG=1; shift ;;
       --json) JSON_OUT=1; shift ;;
       -o|--report) REPORT_FILE_OVERRIDE="$2"; shift 2 ;;
@@ -131,8 +190,29 @@ run_ssh_sweep() {
 
 main() {
   parse_args "$@"
+
+  if [[ "$LIST_TASKS" == "1" ]]; then
+    tasks_list
+    exit 0
+  fi
+
   load_config
   require_local_bins
+
+  if [[ "$ASK_TASKS" == "1" && "$NONINTERACTIVE" == "1" ]]; then
+    loge "--ask-tasks cannot be used with -y/--yes"; exit 2
+  fi
+  if [[ "$ASK_TASKS" != "1" ]]; then
+    if [[ -n "$ONLY_TASKS" ]]; then
+      local _pre=()
+      tasks_parse_csv_to_array _pre "$ONLY_TASKS" || exit 2
+    fi
+    if [[ -n "$SKIP_TASKS" ]]; then
+      local _pres=()
+      tasks_parse_csv_to_array _pres "$SKIP_TASKS" || exit 2
+    fi
+  fi
+
   init_result_store
   init_ssh_status_store
   init_parallel_store
@@ -144,22 +224,11 @@ main() {
   emit "Time:   $(date -Is)"
   emit "Parallel jobs: ${PARALLEL_JOBS:-8}"
 
+  tasks_select || exit $?
   prompt_credentials
 
   set +e
-  run_ssh_sweep
-  run_port_matrix
-  run_kafka_cascade
-  check_vip_owner
-  check_kafka_services
-  check_kafka_membership
-  check_kafka_controller
-  check_kafka_partition_health
-  check_kafka_disk_logdirs
-  check_kafka_consumer_lag
-  check_kafka_config_drift
-  check_kafka_capacity
-  check_all_os_security
+  run_selected_tasks
   set -e
 
   local rc=0

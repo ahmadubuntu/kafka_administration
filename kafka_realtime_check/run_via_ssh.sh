@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copy this toolkit to a remote Kafka host and run run_all.sh there.
+# Copy the broker-admin toolkit to a remote Kafka host and run run_admin_suite.sh there.
 #
 # Usage:
 #   export KAFKA_SSH_HOST=devkafka
@@ -8,12 +8,28 @@
 # Optional:
 #   REMOTE_DIR=/tmp/kafka_administration ./run_via_ssh.sh
 #   ./run_via_ssh.sh user@host
+#   ./run_via_ssh.sh user@host -- --only host,service
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-HOST="${1:-${KAFKA_SSH_HOST:-}}"
+HOST=""
+CHILD_ARGS=()
+if [[ "${1:-}" == "--" ]]; then
+  shift
+  CHILD_ARGS=("$@")
+elif [[ $# -gt 0 && "$1" != --* ]]; then
+  HOST="$1"
+  shift
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+    CHILD_ARGS=("$@")
+  elif [[ $# -gt 0 ]]; then
+    CHILD_ARGS=("$@")
+  fi
+fi
+HOST="${HOST:-${KAFKA_SSH_HOST:-}}"
 if [[ -z "$HOST" ]]; then
-  echo "Usage: $0 <ssh-host>   or set KAFKA_SSH_HOST" >&2
+  echo "Usage: $0 <ssh-host> [-- admin-suite-args...]   or set KAFKA_SSH_HOST" >&2
   exit 1
 fi
 
@@ -43,8 +59,13 @@ elif [[ -f "$ROOT/env.example" ]]; then
   scp -q "$ROOT/env.example" "$HOST:$REMOTE_DIR/env.example"
 fi
 
-echo "Running suite on $HOST ..."
-ssh -o BatchMode=yes "$HOST" "cd '$REMOTE_DIR' && chmod +x run_all.sh scripts/*.sh lib/*.sh 2>/dev/null; ./run_all.sh"
+echo "Running admin suite on $HOST ..."
+remote_cmd="cd '$REMOTE_DIR' && chmod +x run_admin_suite.sh scripts/*.sh lib/*.sh 2>/dev/null; "
+remote_cmd+="./run_admin_suite.sh"
+for a in "${CHILD_ARGS[@]}"; do
+  remote_cmd+=" $(printf '%q' "$a")"
+done
+ssh -o BatchMode=yes "$HOST" "$remote_cmd"
 
 echo "Fetching reports ..."
 mkdir -p "$LOCAL_PULL"

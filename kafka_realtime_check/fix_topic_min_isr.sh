@@ -25,6 +25,8 @@ source "${ROOT_DIR}/lib/parallel.sh"
 source "${ROOT_DIR}/lib/ssh.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/kafka_cluster.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/tasks.sh"
 
 CONFIG_FILE=""
 FIND_VAL=1
@@ -37,13 +39,22 @@ USE_SUDO=1
 VERBOSE=0
 LIST_FILE=""
 JOBS_ARG="ask"   # ask | auto | <int>
-SKIP_CLUSTER=0
-SKIP_TOPICS=0
 _ALTER_OK_FILE=""
 _ALTER_FAIL_FILE=""
 _ALTER_LOCK=""
 _ALTER_VALUE=""
 _ALTER_BROKERS=()
+
+# id|prereqs|title|aliases
+TASK_CATALOG=(
+  "ssh||SSH connectivity|ssh,ssh connectivity,connectivity"
+  "cluster|ssh|Cluster default min.insync.replicas|cluster,cluster default,broker default,default"
+  "topics|ssh|Topic scan / alter|topics,topic,topic scan,topic alter"
+)
+TASKS_LIST_EXAMPLES="  $(basename "$0") -c CONFIG.env --only cluster
+  $(basename "$0") -c CONFIG.env --only topics --find 1 --set 2
+  $(basename "$0") -c CONFIG.env --skip topics
+  $(basename "$0") -c CONFIG.env --ask-tasks"
 
 usage() {
   cat <<EOF
@@ -58,8 +69,12 @@ Options:
   --set N             Target value (default: ask interactively, or 2 with -y)
   --apply             Apply changes (cluster default + matching topics)
   --jobs N|auto|ask   Parallel topic alters (default: ask; suggested range 8–32)
-  --skip-cluster      Do not change broker-default / server.properties
-  --skip-topics       Do not alter per-topic configs
+  --only TASKS        Run only these tasks (ssh, cluster, topics)
+  --skip TASKS        Skip these tasks
+  --ask-tasks         Interactive task picker
+  --list-tasks        List tasks and exit
+  --skip-cluster      Alias for --skip cluster
+  --skip-topics       Alias for --skip topics
   -o, --out FILE      Write matching topic names to FILE
   -y, --yes           Non-interactive confirms
   -v, --verbose       Verbose alter failures
@@ -80,8 +95,18 @@ parse_args() {
       --set) SET_VAL="$2"; shift 2 ;;
       --apply) APPLY=1; shift ;;
       --jobs) JOBS_ARG="$2"; shift 2 ;;
-      --skip-cluster) SKIP_CLUSTER=1; shift ;;
-      --skip-topics) SKIP_TOPICS=1; shift ;;
+      --only) ONLY_TASKS="$2"; shift 2 ;;
+      --skip) SKIP_TASKS="$2"; shift 2 ;;
+      --ask-tasks) ASK_TASKS=1; shift ;;
+      --list-tasks) LIST_TASKS=1; shift ;;
+      --skip-cluster)
+        if [[ -n "$SKIP_TASKS" ]]; then SKIP_TASKS+=",cluster"; else SKIP_TASKS="cluster"; fi
+        shift
+        ;;
+      --skip-topics)
+        if [[ -n "$SKIP_TASKS" ]]; then SKIP_TASKS+=",topics"; else SKIP_TASKS="topics"; fi
+        shift
+        ;;
       -o|--out) LIST_FILE="$2"; shift 2 ;;
       -y|--yes) NONINTERACTIVE=1; shift ;;
       -v|--verbose) VERBOSE=1; shift ;;
@@ -445,6 +470,12 @@ _alter_one_topic() {
 
 main() {
   parse_args "$@"
+
+  if [[ "$LIST_TASKS" == "1" ]]; then
+    tasks_list
+    exit 0
+  fi
+
   load_config
 
   if ! [[ "$FIND_VAL" =~ ^[0-9]+$ ]]; then
@@ -460,6 +491,7 @@ main() {
   emit "Config: ${CONFIG_FILE}"
   emit "Mode:   $([[ "$APPLY" == "1" ]] && echo APPLY || echo SCAN-ONLY)"
 
+  tasks_select || exit $?
   prompt_credentials
 
   if [[ -n "${KAFKA_BOOTSTRAP:-}" ]]; then
@@ -467,103 +499,115 @@ main() {
   fi
   export KAFKA_CONNECT_BOOTSTRAP
 
-  section "SSH connectivity"
-  _ensure_ssh_hosts
-  local broker="$ADMIN_BROKER_HOST"
-  emit "Admin broker: ${broker}"
-  emit "Bootstrap:    ${KAFKA_CONNECT_BOOTSTRAP}"
-  emit "Command cfg:  ${KAFKA_COMMAND_CONFIG:-none}"
-
-  section "Cluster default min.insync.replicas"
-  local live_raw file_raw live_default file_note
-  live_raw="$(_remote_broker_default_isr "$broker" 2>/dev/null | tr -d '\r' | tail -1 || true)"
-  case "$live_raw" in
-    set:*)
-      live_default="${live_raw#set:}"
-      emit "Live broker-default (--entity-default): ${live_default}"
-      ;;
-    unset:builtin|"")
-      live_default=""
-      emit "Live broker-default (--entity-default): unset — Kafka built-in default is usually 1 (not shown until set dynamically)"
-      ;;
-    *)
-      live_default=""
-      emit "Live broker-default (--entity-default): unknown (${live_raw})"
-      ;;
-  esac
-
-  file_raw="$(_remote_file_isr "$broker" 2>/dev/null | tr -d '\r' | tail -1 || true)"
-  file_note="$(_format_file_isr "$file_raw")"
-  emit "File on ${broker} (${KAFKA_SERVER_PROPERTIES:-server.properties}): ${file_note}"
-
-  local h
-  for h in "${_ALL_KAFKA_HOSTS[@]}"; do
-    ssh_host_is_ok "$h" || continue
-    local fr
-    fr="$(_remote_file_isr "$h" 2>/dev/null | tr -d '\r' | tail -1 || true)"
-    emit "  file ${h}: $(_format_file_isr "$fr")"
-  done
-
-  _ask_set_val
-  if ! [[ "$SET_VAL" =~ ^[0-9]+$ ]] || (( SET_VAL < 1 )); then
-    loge "--set must be integer >= 1"; exit 2
+  if tasks_selected ssh || tasks_selected cluster || tasks_selected topics; then
+    section "SSH connectivity"
+    _ensure_ssh_hosts
+    local broker="$ADMIN_BROKER_HOST"
+    emit "Admin broker: ${broker}"
+    emit "Bootstrap:    ${KAFKA_CONNECT_BOOTSTRAP}"
+    emit "Command cfg:  ${KAFKA_COMMAND_CONFIG:-none}"
   fi
-  emit "Target min.insync.replicas: ${SET_VAL}"
 
-  if [[ "$APPLY" == "1" && "$SKIP_CLUSTER" != "1" ]]; then
-    section "Apply cluster default (no Kafka restart)"
-    emit "1) kafka-configs --entity-type brokers --entity-default --alter --add-config min.insync.replicas=${SET_VAL}"
-    emit "2) MUST inject active min.insync.replicas=${SET_VAL} into server.properties on every node (uncomment/replace; no restart)"
-    if ! _confirm "Set cluster default min.insync.replicas=${SET_VAL} (live + files)?"; then
-      emit "Skipped cluster default change."
-    else
-      local out rc=0
-      if [[ "$live_default" == "$SET_VAL" ]]; then
-        emit "Live broker-default already ${SET_VAL} — skipping dynamic alter."
+  local broker="${ADMIN_BROKER_HOST:-}"
+
+  if tasks_selected cluster; then
+    section "Cluster default min.insync.replicas"
+    local live_raw file_raw live_default file_note
+    live_raw="$(_remote_broker_default_isr "$broker" 2>/dev/null | tr -d '\r' | tail -1 || true)"
+    case "$live_raw" in
+      set:*)
+        live_default="${live_raw#set:}"
+        emit "Live broker-default (--entity-default): ${live_default}"
+        ;;
+      unset:builtin|"")
+        live_default=""
+        emit "Live broker-default (--entity-default): unset — Kafka built-in default is usually 1 (not shown until set dynamically)"
+        ;;
+      *)
+        live_default=""
+        emit "Live broker-default (--entity-default): unknown (${live_raw})"
+        ;;
+    esac
+
+    file_raw="$(_remote_file_isr "$broker" 2>/dev/null | tr -d '\r' | tail -1 || true)"
+    file_note="$(_format_file_isr "$file_raw")"
+    emit "File on ${broker} (${KAFKA_SERVER_PROPERTIES:-server.properties}): ${file_note}"
+
+    local h
+    for h in "${_ALL_KAFKA_HOSTS[@]}"; do
+      ssh_host_is_ok "$h" || continue
+      local fr
+      fr="$(_remote_file_isr "$h" 2>/dev/null | tr -d '\r' | tail -1 || true)"
+      emit "  file ${h}: $(_format_file_isr "$fr")"
+    done
+
+    _ask_set_val
+    if ! [[ "$SET_VAL" =~ ^[0-9]+$ ]] || (( SET_VAL < 1 )); then
+      loge "--set must be integer >= 1"; exit 2
+    fi
+    emit "Target min.insync.replicas: ${SET_VAL}"
+
+    if [[ "$APPLY" == "1" ]]; then
+      section "Apply cluster default (no Kafka restart)"
+      emit "1) kafka-configs --entity-type brokers --entity-default --alter --add-config min.insync.replicas=${SET_VAL}"
+      emit "2) MUST inject active min.insync.replicas=${SET_VAL} into server.properties on every node (uncomment/replace; no restart)"
+      if ! _confirm "Set cluster default min.insync.replicas=${SET_VAL} (live + files)?"; then
+        emit "Skipped cluster default change."
       else
-        out="$(_remote_alter_broker_default "$broker" "$SET_VAL" 2>&1)" || rc=$?
-        if [[ $rc -eq 0 ]]; then
-          emit "${C_GREEN}Live broker-default altered to ${SET_VAL}${C_RESET}"
+        local out rc=0
+        if [[ "$live_default" == "$SET_VAL" ]]; then
+          emit "Live broker-default already ${SET_VAL} — skipping dynamic alter."
         else
-          loge "Failed live broker-default alter (rc=${rc})"
-          [[ "$VERBOSE" == "1" ]] && emit "$out"
-          exit 2
+          out="$(_remote_alter_broker_default "$broker" "$SET_VAL" 2>&1)" || rc=$?
+          if [[ $rc -eq 0 ]]; then
+            emit "${C_GREEN}Live broker-default altered to ${SET_VAL}${C_RESET}"
+          else
+            loge "Failed live broker-default alter (rc=${rc})"
+            [[ "$VERBOSE" == "1" ]] && emit "$out"
+            exit 2
+          fi
         fi
-      fi
-      local file_fail=0
-      for h in "${_ALL_KAFKA_HOSTS[@]}"; do
-        ssh_host_is_ok "$h" || continue
-        rc=0
-        out="$(_remote_update_server_properties_isr "$h" "$SET_VAL" 2>&1)" || rc=$?
-        if [[ $rc -eq 0 ]]; then
-          # Re-read and require active=SET_VAL
-          local fr
-          fr="$(_remote_file_isr "$h" 2>/dev/null | tr -d '\r' | tail -1 || true)"
-          if [[ "$fr" == "active:${SET_VAL}" ]]; then
-            emit "  ${C_GREEN}OK${C_RESET}  ${h} server.properties active min.insync.replicas=${SET_VAL}"
+        local file_fail=0
+        for h in "${_ALL_KAFKA_HOSTS[@]}"; do
+          ssh_host_is_ok "$h" || continue
+          rc=0
+          out="$(_remote_update_server_properties_isr "$h" "$SET_VAL" 2>&1)" || rc=$?
+          if [[ $rc -eq 0 ]]; then
+            local fr
+            fr="$(_remote_file_isr "$h" 2>/dev/null | tr -d '\r' | tail -1 || true)"
+            if [[ "$fr" == "active:${SET_VAL}" ]]; then
+              emit "  ${C_GREEN}OK${C_RESET}  ${h} server.properties active min.insync.replicas=${SET_VAL}"
+            else
+              file_fail=1
+              emit "  ${C_RED}FAIL${C_RESET} ${h} inject did not verify (got: $(_format_file_isr "$fr"))"
+            fi
+            [[ "$VERBOSE" == "1" && -n "$out" ]] && emit "         ${out}"
           else
             file_fail=1
-            emit "  ${C_RED}FAIL${C_RESET} ${h} inject did not verify (got: $(_format_file_isr "$fr"))"
+            emit "  ${C_RED}FAIL${C_RESET} ${h} server.properties write (rc=${rc}) — need sudo?"
+            [[ "$VERBOSE" == "1" ]] && emit "         ${out}"
           fi
-          [[ "$VERBOSE" == "1" && -n "$out" ]] && emit "         ${out}"
-        else
-          file_fail=1
-          emit "  ${C_RED}FAIL${C_RESET} ${h} server.properties write (rc=${rc}) — need sudo?"
-          [[ "$VERBOSE" == "1" ]] && emit "         ${out}"
-        fi
-      done
-      live_raw="$(_remote_broker_default_isr "$broker" 2>/dev/null | tr -d '\r' | tail -1 || true)"
-      emit "Verified live broker-default: ${live_raw:-unknown}"
-      (( file_fail == 0 )) || { loge "One or more server.properties injections failed"; exit 2; }
+        done
+        live_raw="$(_remote_broker_default_isr "$broker" 2>/dev/null | tr -d '\r' | tail -1 || true)"
+        emit "Verified live broker-default: ${live_raw:-unknown}"
+        (( file_fail == 0 )) || { loge "One or more server.properties injections failed"; exit 2; }
+      fi
+    else
+      emit ""
+      emit "${C_YELLOW}Scan-only for cluster: re-run with --apply --set ${SET_VAL} to change broker-default + inject server.properties (no restart).${C_RESET}"
     fi
-  elif [[ "$APPLY" != "1" ]]; then
-    emit ""
-    emit "${C_YELLOW}Scan-only for cluster: re-run with --apply --set ${SET_VAL} to change broker-default + inject server.properties (no restart).${C_RESET}"
   fi
 
-  if [[ "$SKIP_TOPICS" == "1" ]]; then
-    emit "Skipping topic scan (--skip-topics)."
+  if ! tasks_selected topics; then
+    emit "Skipping topic scan (task not selected)."
     exit 0
+  fi
+
+  if [[ -z "$SET_VAL" ]]; then
+    _ask_set_val
+  fi
+  if ! [[ "$SET_VAL" =~ ^[0-9]+$ ]] || (( SET_VAL < 1 )); then
+    loge "--set must be integer >= 1"; exit 2
   fi
 
   section "Scan topics (effective min.insync.replicas)"
