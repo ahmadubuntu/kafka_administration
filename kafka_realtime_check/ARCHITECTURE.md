@@ -52,5 +52,6 @@ flowchart TD
 1. **`./run_all.sh`** — orchestrator over the suites below (`--only ha,min_isr,admin`).
 2. **`./check_kafka_ha.sh`** — inventory-driven multi-node HA check (skill `ha-cluster-healthcheck`); tasks via `--only` / `--skip`.
 3. **`./fix_topic_min_isr.sh`** — cluster/topic `min.insync.replicas` scan/apply; tasks `ssh`, `cluster`, `topics`.
-4. **`./run_admin_suite.sh` + `scripts/`** — deep single-broker admin diagnostics (formerly `./run_all.sh`).
-5. **`./run_via_ssh.sh`** — sync admin suite to a broker and run it there.
+4. **`./fix_topic_replication.sh`** — find topics by RF and raise via `kafka-reassign-partitions`.
+5. **`./run_admin_suite.sh` + `scripts/`** — deep single-broker admin diagnostics (formerly `./run_all.sh`).
+6. **`./run_via_ssh.sh`** — sync admin suite to a broker and run it there.

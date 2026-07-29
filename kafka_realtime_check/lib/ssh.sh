@@ -72,7 +72,7 @@ mark_ssh_nomux() {
 ssh_base_opts() {
   local to="${1:-${SSH_TIMEOUT_SEC:-12}}"
   local host="${2-}"
-  local opts="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=${to} -o ServerAliveInterval=5 -o LogLevel=ERROR -p ${SSH_PORT:-22}"
+  local opts="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=${to} -o ServerAliveInterval=${SSH_SERVER_ALIVE_INTERVAL:-5} -o LogLevel=ERROR -p ${SSH_PORT:-22}"
   if [[ -n "${_SSH_CTRL_DIR:-}" && -n "$host" ]] && ! ssh_mux_disabled "$host"; then
     opts+=" -o ControlMaster=auto -o ControlPersist=${SSH_CONTROL_PERSIST_SEC:-120} -o ControlPath=$(ssh_ctrl_path "$host")"
   else

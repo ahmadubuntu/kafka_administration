@@ -5,9 +5,10 @@ Toolkits in `kafka_realtime_check`:
 1. **`run_all.sh`** — orchestrator: HA + min.isr scan + broker admin suite  
 2. **`check_kafka_ha.sh`** — inventory-driven multi-node HA health check  
 3. **`fix_topic_min_isr.sh`** — cluster/topic `min.insync.replicas` scan/apply  
-4. **`run_admin_suite.sh` + `scripts/`** — deep single-broker admin diagnostics  
+4. **`fix_topic_replication.sh`** — find topics by RF (e.g. 1,2) and raise via reassignment  
+5. **`run_admin_suite.sh` + `scripts/`** — deep single-broker admin diagnostics  
    (formerly `run_all.sh`)  
-5. **`run_via_ssh.sh`** — sync admin suite to a broker and run it there  
+6. **`run_via_ssh.sh`** — sync admin suite to a broker and run it there  
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for topology and check flow.
 
@@ -59,6 +60,27 @@ Reports: `reports/kafkaha-<slug>-<timestamp>.log`.
 
 `--skip-cluster` / `--skip-topics` remain as aliases for `--skip cluster` / `--skip topics`.
 
+## Topic replication factor
+
+Finds topics with `ReplicationFactor` in `--find` (default `1,2`) and can raise them
+to `--set` (default `3`) using `kafka-reassign-partitions` (keeps existing replicas,
+adds brokers). Without `--apply` only reports + writes a JSON plan under `reports/`.
+
+```bash
+# Report topics with RF 1 or 2 (and RF < 3)
+./fix_topic_replication.sh -c config/clusters/stgkafka.env -u "$USER" -y --find 1,2 --set 3
+
+# Execute reassignment to RF=3
+./fix_topic_replication.sh -c config/clusters/stgkafka.env -u "$USER" -y --find 1,2 --set 3 --apply
+
+# Only RF=1 topics; scan only
+./fix_topic_replication.sh -c config/clusters/stgkafka.env -u "$USER" -y --only scan --find 1 --set 3
+
+./fix_topic_replication.sh --list-tasks
+```
+
+Needs at least `--set` live brokers. Internal `__*` topics skipped unless `--include-internal`.
+
 ## Quick start — deep broker admin
 
 ```bash
@@ -92,6 +114,7 @@ Credentials: SSH user prompted once (`-u` / `-y`); sudo once; Kafka SASL via `KA
 run_all.sh                 # orchestrator (all suites)
 check_kafka_ha.sh
 fix_topic_min_isr.sh
+fix_topic_replication.sh
 run_admin_suite.sh         # deep broker admin (was run_all.sh)
 run_via_ssh.sh
 lib/tasks.sh               # shared --only/--skip/--ask-tasks
