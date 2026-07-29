@@ -1,0 +1,8 @@
+env.sh
+reports/
+*.prom
+__pycache__/
+*.pyc
+.DS_Store
+config/clusters/*.env
+!config/clusters/*.example.env

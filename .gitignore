@@ -1,8 +1,9 @@
-env.sh
-reports/
-*.prom
-__pycache__/
-*.pyc
+# Local secrets / generated — under kafka_realtime_check/
+kafka_realtime_check/env.sh
+kafka_realtime_check/reports/
+kafka_realtime_check/**/__pycache__/
+kafka_realtime_check/**/*.pyc
+kafka_realtime_check/**/*.prom
+kafka_realtime_check/config/clusters/*.env
+!kafka_realtime_check/config/clusters/*.example.env
 .DS_Store
-config/clusters/*.env
-!config/clusters/*.example.env
