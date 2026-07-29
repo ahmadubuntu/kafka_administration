@@ -3,27 +3,36 @@ description: Mirror GitHub changes to Azure DevOps DataPlatform
 alwaysApply: true
 ---
 
-# Dual Git remotes
+# Dual Git remotes (mandatory)
 
-This repository is mirrored to two remotes:
+This repository has **dual-git enabled**. Any time you push (commit, branch,
+release, or tag) you MUST update **both** remotes in the same turn — do **not**
+wait for the user to say "dual-git" or "mirror to Azure".
 
 - `origin`: `https://github.com/ahmadubuntu/kafka_administration.git`
 - `azure`: `https://azure.charisma.tech/DataPlatform/DataPlatform/_git/kafka_administration`
 
-Keep `main` tracking `origin/main`. After pushing a release or commit to
-GitHub, mirror the branch and tags to Azure.
+Keep `main` tracking `origin/main`.
 
-Use `AZDO_PAT_DATAPLATFORM` for Azure authentication. Never use `AZDO_PAT`,
-print the token, commit it, or embed it in a remote URL.
+## Every push checklist
+
+1. `git push origin <branch>` (and tags if any)
+2. Push the same refs to `azure` with `AZDO_PAT_DATAPLATFORM` (never `AZDO_PAT`)
+3. `git branch --set-upstream-to=origin/main main` if upstream drifted
+4. If Azure is unreachable, say so explicitly and leave the exact retry commands
 
 ```bash
 AUTH_HEADER="AUTHORIZATION: Basic $(printf ':%s' "$AZDO_PAT_DATAPLATFORM" | base64 -w0)"
+git push origin main
+git push origin --tags   # when tags changed
 git -c credential.helper= -c http.extraHeader="$AUTH_HEADER" push azure main
 git -c credential.helper= -c http.extraHeader="$AUTH_HEADER" push azure --tags
 git branch --set-upstream-to=origin/main main
 ```
 
-For read-only verification:
+Never print, commit, or embed the PAT in a remote URL.
+
+Read-only check:
 
 ```bash
 AUTH_HEADER="AUTHORIZATION: Basic $(printf ':%s' "$AZDO_PAT_DATAPLATFORM" | base64 -w0)"
