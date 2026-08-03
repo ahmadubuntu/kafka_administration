@@ -3,7 +3,7 @@
 | Toolkit | Path |
 |---------|------|
 | HA realtime check + min.isr / RF fixers | [`kafka_realtime_check/`](kafka_realtime_check/) |
-| Topic batch admin (delete / set configs by pattern) | [`kafka_topic_admin/`](kafka_topic_admin/) |
+| Topic batch admin (delete / idle cleanup / cluster compare) | [`kafka_topic_admin/`](kafka_topic_admin/) |
 
 ```bash
 cd kafka_realtime_check

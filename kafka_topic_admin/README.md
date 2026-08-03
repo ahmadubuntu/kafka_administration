@@ -71,3 +71,35 @@ Safety: `--delete` needs `--pattern` or `--force-broad`; mutations need `--apply
 
 Idle age is the **newest** `.log` segment mtime across all `BROKER_HOSTS`.
 “Active consumer” means a group describe row with a real `CONSUMER-ID` (not `-`).
+
+## `compare_clusters.sh`
+
+Same probes used when comparing kafkio/CLI latency across envs. Pass **one or more**
+inventories; pick probes with `--only` / `--skip`.
+
+| Probe | What it measures |
+|-------|------------------|
+| `tcp` | TCP connect ms to bootstrap hosts |
+| `counts` | topics / partitions / groups / broker count |
+| `broker_cli` | `api-versions` / `topics --list|--describe` / `log-dirs` on broker via SSH |
+| `local_cli` | same ops from this laptop (`--local-bin`, scp admin props) |
+| `jolokia` | Metadata/ApiVersions/DescribeConfigs means, idle %, external conns, heap |
+| `idle` | age-bucket summary (`>180d` count + GB) |
+
+```bash
+# One cluster, quick size + TCP
+./compare_clusters.sh --clusters-dir ../kafka_realtime_check/config/clusters \
+  --clusters devkafka -u "$USER" -y --only tcp,counts
+
+# Dev vs DMZ vs Stage (repeat -c also works)
+./compare_clusters.sh -u "$USER" -y \
+  -c ../kafka_realtime_check/config/clusters/devkafka.env \
+  -c ../kafka_realtime_check/config/clusters/stgkafka.env \
+  -c ../kafka_realtime_check/config/clusters/dmzkafka.env \
+  --only tcp,counts,broker_cli,local_cli,jolokia \
+  --local-bin ~/Softs/kafka/kafka_2.13-3.9.0/bin
+
+./compare_clusters.sh --list-tasks
+```
+
+Writes a matrix to the console and `reports/compare-*.txt`.
