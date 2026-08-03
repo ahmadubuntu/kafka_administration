@@ -39,14 +39,16 @@ CONFIG_FILE=""
 NONINTERACTIVE=0
 SSH_USER_OVERRIDE="${SSH_USER_OVERRIDE:-}"
 SUDO_PASSWORD_ENV="${SUDO_PASSWORD:-${SUDO_PASSWORD_ENV:-}}"
-USE_SUDO=1
+USE_SUDO=0
 VERBOSE=0
 APPLY=0
 FORCE_BROAD=0
+CHECK_SSH=0
 MAX_TOPICS="${MAX_TOPICS:-200}"
 ACTION="list"   # list | delete | set-config
 JOBS_ARG="8"
 ADMIN_BROKER_HOST=""
+ADMIN_BROKER_OVERRIDE=""
 _ALL_KAFKA_HOSTS=()
 declare -a SET_CONFIGS=()
 _OK_FILE=""
@@ -77,6 +79,9 @@ Safety / filter:
 Connection:
   -c, --config FILE      Cluster inventory (.env) — reuse HA inventories
   -u, --user USER        SSH username
+  --admin-broker HOST    Broker used for kafka CLI over SSH (default: first BROKER_HOSTS)
+  --check-ssh            Sweep SSH to all inventory hosts (off by default)
+  --sudo                 Prompt/use sudo on remotes (off by default; not needed for topic CLI)
   -y, --yes              Non-interactive confirms
   -v, --verbose
   -h, --help
@@ -85,8 +90,9 @@ Examples:
   $(basename "$0") -c ../kafka_realtime_check/config/clusters/devkafka.env -u USER \\
     --pattern '^cursor-test-' --list
   $(basename "$0") -c … -u USER -y --pattern '^cursor-test-' \\
-    --set-config retention.ms=3600000 --set-config retention.bytes=1073741824 --apply
+    --set-config retention.ms=3600000 --apply
   $(basename "$0") -c … -u USER -y --pattern '^cursor-test-' --delete --apply
+  $(basename "$0") -c … -u USER --check-ssh --pattern '^cursor-test-' --list
 EOF
 }
 
@@ -111,6 +117,10 @@ parse_args() {
       --max-topics) MAX_TOPICS="$2"; shift 2 ;;
       --jobs) JOBS_ARG="$2"; shift 2 ;;
       --apply) APPLY=1; shift ;;
+      --check-ssh) CHECK_SSH=1; shift ;;
+      --admin-broker) ADMIN_BROKER_OVERRIDE="$2"; shift 2 ;;
+      --sudo) USE_SUDO=1; shift ;;
+      -n|--no-sudo) USE_SUDO=0; shift ;;
       -y|--yes) NONINTERACTIVE=1; shift ;;
       -v|--verbose) VERBOSE=1; shift ;;
       -h|--help) usage; exit 0 ;;
@@ -169,8 +179,28 @@ _ensure_ssh_hosts() {
       break
     fi
   done
+  if [[ -n "$ADMIN_BROKER_OVERRIDE" ]]; then
+    ADMIN_BROKER_HOST="$ADMIN_BROKER_OVERRIDE"
+  fi
   if [[ -z "$ADMIN_BROKER_HOST" ]]; then
     loge "No SSH-reachable broker in BROKER_HOSTS"; exit 2
+  fi
+}
+
+# Default path: pick admin broker without sweeping every inventory host.
+_pick_admin_broker() {
+  local brokers=() h
+  if [[ -n "$ADMIN_BROKER_OVERRIDE" ]]; then
+    ADMIN_BROKER_HOST="$ADMIN_BROKER_OVERRIDE"
+  else
+    csv_to_array brokers "${BROKER_HOSTS:-}"
+    if ((${#brokers[@]} == 0)); then
+      loge "BROKER_HOSTS empty in inventory"; exit 2
+    fi
+    ADMIN_BROKER_HOST="${brokers[0]}"
+  fi
+  if declare -F mark_ssh_ok >/dev/null 2>&1; then
+    mark_ssh_ok "$ADMIN_BROKER_HOST"
   fi
 }
 
@@ -353,8 +383,12 @@ main() {
   fi
   export KAFKA_CONNECT_BOOTSTRAP
 
-  section "SSH connectivity"
-  _ensure_ssh_hosts
+  if [[ "$CHECK_SSH" == "1" ]]; then
+    section "SSH connectivity"
+    _ensure_ssh_hosts
+  else
+    _pick_admin_broker
+  fi
   emit "Admin broker: ${ADMIN_BROKER_HOST}"
   emit "Bootstrap:    ${KAFKA_CONNECT_BOOTSTRAP:-}"
   entity_filter_summary
