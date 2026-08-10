@@ -37,14 +37,15 @@ SSH inventory sweep is **off** by default (use `--check-ssh`); sudo prompt off (
 
 **Never** point `--pattern` at production topic namespaces without a dry-run first.
 
-## `idle_topics.sh`
+## `topic_hygiene.sh`
 
-Finds **dead / idle** topics from `log.dirs` segment mtimes (age buckets), optionally
-checks whether any consumer group has an **active assignment**, then can delete.
+Idle / dead topic report & cleanup, plus topics with **no active consumer**.
+(`idle_topics.sh` is a thin compatibility wrapper that execs this script.)
 
 | Mode | Flags |
 |------|--------|
 | Report | `--report` (default) → age-bucket table + TSV under `reports/` |
+| No-consumer list | `--list-no-consumers` → topics with no live consumer assignment |
 | Annotate consumers | `--with-consumers` |
 | Delete idle, no consumers | `--delete --idle-days 180 --require-no-consumers --apply` |
 | Delete idle even with consumers | `--delete --idle-days 180 --allow-with-consumers --apply` |
@@ -54,23 +55,28 @@ Safety: `--delete` needs `--pattern` or `--force-broad`; mutations need `--apply
 
 ```bash
 # Age buckets (fast — no group describe)
-./idle_topics.sh -c ../kafka_realtime_check/config/clusters/devkafka.env -u "$USER"
+./topic_hygiene.sh -c ../kafka_realtime_check/config/clusters/devkafka.env -u "$USER"
+
+# Topics with no live consumer assignment
+./topic_hygiene.sh -c ../kafka_realtime_check/config/clusters/devkafka.env -u "$USER" \
+  --list-no-consumers --jobs 8
 
 # Same + active consumer annotation
-./idle_topics.sh -c … -u "$USER" --idle-days 180 --with-consumers
+./topic_hygiene.sh -c … -u "$USER" --idle-days 180 --with-consumers
 
 # Dry-run delete: idle ≥180d AND no active consumer
-./idle_topics.sh -c … -u "$USER" -y --idle-days 180 \
+./topic_hygiene.sh -c … -u "$USER" -y --idle-days 180 \
   --delete --require-no-consumers --force-broad
 
 # Apply delete for one namespace
-./idle_topics.sh -c … -u "$USER" -y --idle-days 180 \
+./topic_hygiene.sh -c … -u "$USER" -y --idle-days 180 \
   --pattern '^charisma\.data\.sentry\.' \
   --delete --require-no-consumers --apply --jobs 8
 ```
 
 Idle age is the **newest** `.log` segment mtime across all `BROKER_HOSTS`.
-“Active consumer” means a group describe row with a real `CONSUMER-ID` (not `-`).
+“Active consumer” / `--list-no-consumers` means a group describe row with a real
+`CONSUMER-ID` (not `-`). Empty groups or committed offsets alone do **not** count.
 
 ## `compare_clusters.sh`
 
