@@ -9,9 +9,13 @@ The owner asked to **always merge** implementation PRs in this repository
 after opening them. Do not wait for a second "please merge" message.
 
 1. Open the PR into `main` (feature branch only; never push commits onto `main` directly).
-2. Merge it (`gh pr merge --merge` or squash if the PR is a single commit).
+2. Merge it (`gh pr merge --merge --delete-branch`).
 3. Dual-push the updated `main` to GitHub `origin` and Azure `azure`.
-4. Do not use `bypassPolicy`. If GitHub checks or branch protection block merge, report that.
+4. Delete the leftover feature branch everywhere it exists: local, `origin`, and `azure`.
+   `git push origin --delete <branch>`; Azure with `AZDO_PAT_DATAPLATFORM` + `http.extraHeader`;
+   `git branch -d <branch>` locally. Never delete `main`, `master`, or `dev`.
+5. Azure-only `plans/` commits belong on `azure/internal/plans`, not on a leftover feature branch.
+6. Do not use `bypassPolicy`. If GitHub checks or branch protection block merge, report that.
 
 This repo rule overrides the global "never auto-merge" guidance **for this repo only**.
 `plans/` remains Azure-only: the GitHub PR must not add new `plans/` files.
