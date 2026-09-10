@@ -223,6 +223,17 @@ def acl_diffs(
     return {"add": add, "extra": extra}
 
 
+# kafka-acls.sh resource flags. USER is ResourceType.USER (--user-principal).
+ACL_RESOURCE_FLAGS: dict[str, tuple[str, bool]] = {
+    "TOPIC": ("--topic", True),
+    "GROUP": ("--group", True),
+    "CLUSTER": ("--cluster", False),
+    "TRANSACTIONAL_ID": ("--transactional-id", True),
+    "DELEGATION_TOKEN": ("--delegation-token", True),
+    "USER": ("--user-principal", True),
+}
+
+
 def acl_cli_args(entry: dict[str, str], *, remove: bool = False) -> list[str]:
     args: list[str] = ["--remove"] if remove else ["--add"]
     perm = entry["perm"].upper()
@@ -239,20 +250,28 @@ def acl_cli_args(entry: dict[str, str], *, remove: bool = False) -> list[str]:
     else:
         args += ["--resource-pattern-type", "literal"]
     rtype = entry["rtype"].upper()
-    name = entry["name"]
-    if rtype == "TOPIC":
-        args += ["--topic", name]
-    elif rtype == "GROUP":
-        args += ["--group", name]
-    elif rtype == "CLUSTER":
-        args += ["--cluster"]
-    elif rtype == "TRANSACTIONAL_ID":
-        args += ["--transactional-id", name]
-    elif rtype == "DELEGATION_TOKEN":
-        args += ["--delegation-token", name]
-    else:
+    spec = ACL_RESOURCE_FLAGS.get(rtype)
+    if spec is None:
         raise ValueError(f"unsupported ACL resource type {rtype}")
+    flag, needs_name = spec
+    if needs_name:
+        args += [flag, entry["name"]]
+    else:
+        args.append(flag)
     return args
+
+
+def acl_argv_lists(
+    rows: list[dict[str, str]], *, remove: bool = False
+) -> tuple[list[list[str]], list[dict[str, str]]]:
+    argv: list[list[str]] = []
+    skipped: list[dict[str, str]] = []
+    for row in rows:
+        try:
+            argv.append(acl_cli_args(row, remove=remove))
+        except ValueError as exc:
+            skipped.append({**row, "reason": str(exc)})
+    return argv, skipped
 
 
 def _print_json(obj: Any) -> None:
@@ -291,11 +310,14 @@ def main() -> None:
         src = parse_acls(open(argv.src_acls, encoding="utf-8", errors="replace").read())
         dst = parse_acls(open(argv.dst_acls, encoding="utf-8", errors="replace").read())
         dff = acl_diffs(src, dst, include_internal=argv.include_internal)
+        add_argv, skip_add = acl_argv_lists(dff["add"])
+        remove_argv, skip_rm = acl_argv_lists(dff["extra"], remove=True)
         out = {
             "add": dff["add"],
             "extra": dff["extra"],
-            "add_argv": [acl_cli_args(x) for x in dff["add"]],
-            "remove_argv": [acl_cli_args(x, remove=True) for x in dff["extra"]],
+            "add_argv": add_argv,
+            "remove_argv": remove_argv,
+            "skipped": skip_add + skip_rm,
         }
         _print_json(out)
 

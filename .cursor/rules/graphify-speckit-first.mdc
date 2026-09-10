@@ -1,0 +1,11 @@
+---
+description: Init graphify and Spec Kit first in this repo
+alwaysApply: true
+---
+
+# Graphify + Spec Kit first
+
+If `graphify-out/graph.json` is missing, run `graphify update .` before exploring.
+If `.specify/` is missing, run
+`specify init . --here --force --non-interactive --integration cursor-agent`.
+Then follow `.specify/memory/constitution.md` and `.cursor/skills/speckit-*`.

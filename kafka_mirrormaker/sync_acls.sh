@@ -128,7 +128,12 @@ for r in data.get("extra") or []:
     print(f"  - {r['perm']:5} {r['operation']:12} {r['rtype']:8} {r['pattern']:8} {r['name']}  {r['principal']} host={r['host']}")
 if not data.get("extra"):
     print("  (none)")
-print(f"add={len(data.get('add') or [])} extra={len(data.get('extra') or [])}")
+print("=== Skipped (unsupported resource type; not applied) ===")
+for r in data.get("skipped") or []:
+    print(f"  ? {r.get('rtype')} {r.get('name')}  {r.get('reason')}")
+if not data.get("skipped"):
+    print("  (none)")
+print(f"add={len(data.get('add') or [])} extra={len(data.get('extra') or [])} skipped={len(data.get('skipped') or [])}")
 PY
 
   if [[ "$APPLY" != "1" ]]; then
@@ -138,14 +143,24 @@ PY
   fi
 
   python3 -c '
-import json, sys
+import json, os, sys
+sys.path.insert(0, os.environ["MM_LIB"])
+from sync_parse import acl_cli_args
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 out = sys.argv[2]
 with open(out, "w", encoding="utf-8") as fh:
     for r in data.get("add") or []:
+        try:
+            acl_cli_args(r)
+        except ValueError:
+            continue
         fh.write("ADD\t{rtype}\t{name}\t{pattern}\t{principal}\t{host}\t{operation}\t{perm}\n".format(**r))
     if sys.argv[3] == "1":
         for r in data.get("extra") or []:
+            try:
+                acl_cli_args(r, remove=True)
+            except ValueError:
+                continue
             fh.write("DEL\t{rtype}\t{name}\t{pattern}\t{principal}\t{host}\t{operation}\t{perm}\n".format(**r))
 ' "${work}/diff.json" "${work}/ops.tsv" "$([[ "$PRUNE" == "1" ]] && echo 1 || echo 0)"
 

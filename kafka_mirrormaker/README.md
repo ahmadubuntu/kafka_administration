@@ -57,4 +57,5 @@ Does not change RF.
 ```
 
 `--prune` is dest-only ACL delete. Topic config sync skips replica-throttle and
-`remote.*` keys unless `--sync-skipped`.
+`remote.*` keys unless `--sync-skipped`. USER ACLs use `--user-principal`.
+Unknown resource types are reported as skipped; they do not abort dry-run.
