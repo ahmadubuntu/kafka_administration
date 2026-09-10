@@ -18,6 +18,7 @@ Inventory-driven Kafka HA checks, topic admin, and MirrorMaker 2 prod/DR diagnos
 - Dual remotes: `origin` (GitHub) and `azure` (DataPlatform) — see `.cursor/rules/azure-devops.mdc`.
 - `plans/` is Azure-only: never push it to GitHub (`origin`). See `.cursor/rules/plans-azure-only.mdc`.
 - Read the **latest** file in `plans/` before changing behavior.
+- If `graphify-out/graph.json` or `.specify/` is missing, initializing them is the **first** action (`graphify update .`, `specify init . --here --force --non-interactive --integration cursor-agent`).
 
 ## How to run (MM2 toolkit)
 
@@ -48,8 +49,9 @@ cp config/clusters/dr.example.env config/clusters/dr.env
 - Identity MM2 dest offsets are a different space than source; HWM-sum gap is not leftover history.
 - Do not set MM2 `producer.compression.type` globally. Dest `compression.type` only on topics already compressed on prod.
 - MM2 cannot preserve source batch compression (consumer decompresses; one producer codec per flow). Equivalent: dest topic `compression.type` per topic.
-- `sync_topic_configs.sh` / `sync_acls.sh` are source→dest, dry-run unless `--apply -y`. `--apply` never creates missing dest topics; it only alters configs on topics present on both sides. `--prune` deletes dest-only ACLs.
+- `sync_topic_configs.sh` / `sync_acls.sh` are source→dest, dry-run unless `--apply -y`. `--apply` never creates missing dest topics; it only alters configs on topics present on both sides. `--prune` deletes dest-only ACLs. USER ACLs map to `--user-principal`; unknown resource types are skipped, not a traceback.
 
 ## Current focus
 
-Latest plan (disk / Azure only): `plans/2026-09-10_043200_sync-configs-no-create.md`
+Latest plan (disk / Azure only): `plans/2026-09-10_044000_acl-user-and-speckit.md`
+Active Spec Kit feature: `specs/001-acl-user-resource`

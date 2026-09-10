@@ -7,6 +7,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sync_parse import (
+    acl_argv_lists,
     acl_cli_args,
     acl_diffs,
     alters_by_topic,
@@ -87,6 +88,42 @@ Current ACLs for resource `ResourcePattern(resourceType=TOPIC, name=extra-dr, pa
         argv = acl_cli_args(d["add"][0])
         self.assertIn("--add", argv)
         self.assertIn("--allow-principal", argv)
+
+    def test_user_resource_argv(self) -> None:
+        src = """
+Current ACLs for resource `ResourcePattern(resourceType=USER, name=User:app, patternType=LITERAL)`:
+ 	(principal=User:admin, host=*, operation=Describe, permissionType=ALLOW)
+"""
+        dst = """
+Current ACLs for resource `ResourcePattern(resourceType=USER, name=User:extra, patternType=LITERAL)`:
+ 	(principal=User:other, host=*, operation=Describe, permissionType=ALLOW)
+"""
+        d = acl_diffs(parse_acls(src), parse_acls(dst))
+        add_argv, skip_add = acl_argv_lists(d["add"])
+        rm_argv, skip_rm = acl_argv_lists(d["extra"], remove=True)
+        self.assertEqual(skip_add, [])
+        self.assertEqual(skip_rm, [])
+        self.assertIn("--user-principal", add_argv[0])
+        self.assertIn("User:app", add_argv[0])
+        self.assertIn("--user-principal", rm_argv[0])
+        self.assertIn("User:extra", rm_argv[0])
+
+    def test_unknown_resource_skipped(self) -> None:
+        rows = [
+            {
+                "rtype": "NOTATYPE",
+                "name": "x",
+                "pattern": "LITERAL",
+                "principal": "User:a",
+                "host": "*",
+                "operation": "READ",
+                "perm": "ALLOW",
+            }
+        ]
+        argv, skipped = acl_argv_lists(rows)
+        self.assertEqual(argv, [])
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("NOTATYPE", skipped[0]["reason"])
 
 
 if __name__ == "__main__":
