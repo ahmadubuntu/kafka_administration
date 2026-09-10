@@ -56,6 +56,8 @@ Does not change RF.
 ./sync_acls.sh -c prod.env -c dr.env -y --apply --prune   # also drop dest-only ACLs
 ```
 
-`--prune` is dest-only ACL delete. Topic config sync skips replica-throttle and
-`remote.*` keys unless `--sync-skipped`. USER ACLs use `--user-principal`.
-Unknown resource types are reported as skipped; they do not abort dry-run.
+`--prune` is dest-only ACL delete. With `-y --apply`, the script passes
+`--force` to `kafka-acls.sh` so removes are not blocked by `(y/n)` prompts.
+Topic config sync skips replica-throttle and `remote.*` keys unless
+`--sync-skipped`. USER ACLs use `--user-principal`. Unknown resource types are
+reported as skipped; they do not abort dry-run.
