@@ -34,3 +34,9 @@ HWM lag, optional Jolokia, Connect REST (INFO if dedicated MM2 has no REST).
 ```
 
 Do not put production passwords in git. Reports under `reports/`.
+
+To shrink DR only for topics that are already compressed on prod, set dest
+`compression.type` on those topics (broker recompresses new segments). Do **not**
+set `producer.compression.type` on MM2 — that would compress every mirrored topic.
+`compare_storage.sh` writes `reports/storage-compress-dest-*.txt` (dest-only alters).
+Inferred codec default is `lz4` (`COMPRESS_INFERRED_CODEC=zstd` to change).

@@ -280,6 +280,8 @@ main() {
       --src-configs "${WORK}/src.configs" \
       --dst-configs "${WORK}/dst.configs" \
       --extra-tsv "$extra_tsv" \
+      --compress-commands "${REPORT_DIR}/storage-compress-dest-$(date +%Y%m%d-%H%M%S).txt" \
+      --inferred-codec "${COMPRESS_INFERRED_CODEC:-lz4}" \
       --top 30
   fi
 

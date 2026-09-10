@@ -32,6 +32,7 @@ from mm2_parse import (  # noqa: E402
     map_source_to_dest,
     parse_topic_configs,
     parse_topic_describe,
+    recommend_dest_compression,
 )
 
 
@@ -78,6 +79,8 @@ def main() -> None:
     p.add_argument("--src-configs", default="")
     p.add_argument("--dst-configs", default="")
     p.add_argument("--extra-tsv", default="")
+    p.add_argument("--compress-commands", default="")
+    p.add_argument("--inferred-codec", default="lz4")
     p.add_argument("--top", type=int, default=30)
     args = p.parse_args()
 
@@ -140,7 +143,13 @@ def main() -> None:
         extras.append((extra, st, dt, suniq, duniq, sraw, draw))
         sc = src_c.get(st, {})
         dc = dst_c.get(dt, {})
-        for key in ("retention.ms", "retention.bytes", "cleanup.policy"):
+        for key in (
+            "retention.ms",
+            "retention.bytes",
+            "cleanup.policy",
+            "compression.type",
+            "message.timestamp.type",
+        ):
             if sc.get(key) and dc.get(key) and sc.get(key) != dc.get(key):
                 cfg_diffs.append((st, dt, key, sc.get(key), dc.get(key)))
 
@@ -206,6 +215,39 @@ def main() -> None:
             print(f"  {key}: {st}={sv}  {dt}={dv}")
         if len(cfg_diffs) > 50:
             print(f"  … {len(cfg_diffs) - 50} more")
+
+    recs = recommend_dest_compression(
+        [(e, st, dt, su, du) for e, st, dt, su, du, _, _ in extras],
+        src_c,
+        dst_c,
+        sa,
+        da,
+        inferred_codec=args.inferred_codec,
+    )
+    print()
+    print("=== Dest compression (only topics already compressed on source) ===")
+    print("Do not set MM2 producer.compression.type globally.")
+    if not recs:
+        print("  (none: no explicit src codec drift, and no dest/src unique ratio >= 2.5 with extra >= 1 GiB)")
+    else:
+        for r in recs:
+            why = r["reason"]
+            extra_g = gib(int(r["extra"]))
+            if why == "src_topic_config":
+                detail = f"source compression.type={r['src_codec']}"
+            else:
+                detail = f"dest unique / src unique = {r.get('ratio', 0):.1f}x extra={extra_g} GiB (inferred)"
+            print(f"  {r['dst_topic']}  ->  compression.type={r['codec']}  [{detail}]")
+    if args.compress_commands:
+        with open(args.compress_commands, "w", encoding="utf-8") as cf:
+            cf.write("# Dest-only. Review, then run against DR bootstrap + command-config.\n")
+            cf.write("# Do not add producer.compression.type to mm2.properties.\n")
+            for r in recs:
+                cf.write(
+                    f"kafka-configs.sh --entity-type topics --entity-name {r['dst_topic']} "
+                    f"--alter --add-config compression.type={r['codec']}\n"
+                )
+        print(f"Wrote dest-only alter commands: {args.compress_commands}")
 
 
 if __name__ == "__main__":

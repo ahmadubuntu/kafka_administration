@@ -9,13 +9,14 @@ Inventory-driven Kafka HA checks, topic admin, and MirrorMaker 2 prod/DR diagnos
 | `kafka_realtime_check/` | HA health check, min.isr / RF fixers, admin suite |
 | `kafka_topic_admin/` | Pattern topic ops, `topic_hygiene.sh`, `compare_clusters.sh` |
 | `kafka_mirrormaker/` | Prod vs DR storage compare + MM2 dedicated health (run on MM host) |
-| `plans/` | Append-only plan history — **never delete** |
+| `plans/` | Append-only plan history on disk — **never delete**; GitHub omit, Azure-only commit |
 
 ## Non-negotiables
 
 - Inventories: `config/clusters/*.example.env` committed; real `*.env` gitignored.
 - Never commit passwords, PATs, or `KAFKA_COMMAND_CONFIG` contents.
 - Dual remotes: `origin` (GitHub) and `azure` (DataPlatform) — see `.cursor/rules/azure-devops.mdc`.
+- `plans/` is Azure-only: never push it to GitHub (`origin`). See `.cursor/rules/plans-azure-only.mdc`.
 - Read the **latest** file in `plans/` before changing behavior.
 
 ## How to run (MM2 toolkit)
@@ -39,7 +40,10 @@ cp config/clusters/dr.example.env config/clusters/dr.env
 - Kafka 3.9 `kafka-log-dirs.sh` does **not** accept `--json`. Default stdout is JSON plus status lines. Parse with `mm2_parse.parse_logdirs` (JSON dict or array partitions, then text).
 - Dedicated MM2 `*.consumer.group.id` may not exist on source; also list/describe on dest. HWM lag is the fallback.
 - Do not treat `__consumer_offsets` HWM as mirror lag (`skip_hwm_compare`).
+- Identity MM2 dest offsets are a different space than source; HWM-sum gap is not leftover history.
+- Do not set MM2 `producer.compression.type` globally. Dest `compression.type` only on topics already compressed on prod.
+- MM2 cannot preserve source batch compression (consumer decompresses; one producer codec per flow). Equivalent: dest topic `compression.type` per topic.
 
 ## Current focus
 
-Latest plan: [`plans/2026-09-10_015649_mm2-compare-storage-is-python.md`](plans/2026-09-10_015649_mm2-compare-storage-is-python.md)
+Latest plan (disk / Azure only): `plans/2026-09-10_034700_plans-azure-only.md`

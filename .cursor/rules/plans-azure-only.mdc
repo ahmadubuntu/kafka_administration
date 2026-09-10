@@ -1,0 +1,26 @@
+---
+description: Keep plans/ off GitHub; commit and push them only to Azure
+alwaysApply: true
+---
+
+# `plans/` is Azure-only
+
+`plans/` may contain host names, IPs, topic lists, and other internal detail.
+**Never stage, commit, or push `plans/` to GitHub (`origin`).**
+**Do** keep writing plan files on disk (append-only). Commit and push them
+**only** to `azure`.
+
+A single Git commit cannot be “without plans on GitHub” and “with plans on
+Azure”. Use **two commits**:
+
+1. Product commit (no `plans/`) → `git push origin <branch>` **and**
+   `git push azure <branch>` (same SHA).
+2. Separate commit that only adds/updates `plans/` (`git add -f plans/`) →
+   `git push azure <branch>` **only**. Never `git push origin` after this
+   commit until those commits are not on the branch you push to GitHub.
+
+Do not `git rm --cached plans/` and then dual-push: that delete would land on
+Azure too.
+
+Already-tracked `plans/` on `origin` stay until a human asks for a GitHub-only
+history cleanup. New plan files: write to `plans/`, commit with `-f`, Azure only.

@@ -18,3 +18,7 @@ kafka_mirrormaker/config/clusters/*.env
 !kafka_mirrormaker/config/clusters/*.example.env
 
 .DS_Store
+
+# Operator plans (IPs, topics, live cluster notes). Tracked files stay in git
+# until untracked. New files: git add -f and push to azure only, never origin.
+plans/
