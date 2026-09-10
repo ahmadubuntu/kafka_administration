@@ -48,8 +48,8 @@ cp config/clusters/dr.example.env config/clusters/dr.env
 - Identity MM2 dest offsets are a different space than source; HWM-sum gap is not leftover history.
 - Do not set MM2 `producer.compression.type` globally. Dest `compression.type` only on topics already compressed on prod.
 - MM2 cannot preserve source batch compression (consumer decompresses; one producer codec per flow). Equivalent: dest topic `compression.type` per topic.
-- `sync_topic_configs.sh` / `sync_acls.sh` are source→dest, dry-run unless `--apply -y`. `--prune` deletes dest-only ACLs.
+- `sync_topic_configs.sh` / `sync_acls.sh` are source→dest, dry-run unless `--apply -y`. `--apply` never creates missing dest topics; it only alters configs on topics present on both sides. `--prune` deletes dest-only ACLs.
 
 ## Current focus
 
-Latest plan (disk / Azure only): `plans/2026-09-10_035806_sync-topic-configs-acls.md`
+Latest plan (disk / Azure only): `plans/2026-09-10_043200_sync-configs-no-create.md`

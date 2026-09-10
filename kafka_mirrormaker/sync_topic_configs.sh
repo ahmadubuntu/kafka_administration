@@ -44,13 +44,14 @@ Sync topic configs source → dest  v${SCRIPT_VERSION}
   --exclude REGEX
   --include-internal    Include _ / __ topics
   --sync-skipped        Also sync throttle replica lists and remote.* keys
-  --apply               Alter dest (default: print only)
+  --apply               Alter dest configs (default: print only)
   --local-bin DIR
   -y, --yes             Required together with --apply
   -v, --verbose
   -h, --help
 
-Does not create missing dest topics or change RF / partition count.
+Never creates topics (dry-run or --apply). --apply only sets configs on
+topics that already exist on both sides. Does not change RF / partitions.
 EOF
 }
 
@@ -115,21 +116,30 @@ main() {
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 diffs = data.get("diffs") or []
+sets = [r for r in diffs if r.get("action") == "set"]
+skips = [r for r in diffs if r.get("action") == "skip"]
+print("=== config drift (topics on both sides) ===")
 print(f"{'topic':<48} {'key':<36} {'source':<22} dest")
-n_set = n_skip = 0
-for r in diffs:
-    if r.get("action") == "skip":
-        n_skip += 1
-    else:
-        n_set += 1
-    print(f"{r['topic']:<48} {r['key']:<36} {r['src']:<22} {r['dst']}")
-print(f"set={n_set}  skip_missing_dest_topic={n_skip}  topics_to_alter={len(data.get('alters') or {})}")
-if not diffs:
-    print("(no config drift on mapped topics)")
+if sets:
+    for r in sets:
+        print(f"{r['topic']:<48} {r['key']:<36} {r['src']:<22} {r['dst']}")
+else:
+    print("(none)")
+print("=== missing dest topics (report only; never created) ===")
+if skips:
+    for r in skips:
+        print(f"{r['topic']:<48} {r['key']:<36} {r['src']:<22} {r['dst']}")
+else:
+    print("(none)")
+print(
+    f"set={len(sets)}  report_missing_dest={len(skips)}  "
+    f"topics_to_alter={len(data.get('alters') or {})}"
+)
 PY
 
   if [[ "$APPLY" != "1" ]]; then
-    emit "Dry-run. Re-run with --apply -y to set dest configs to source values."
+    emit "Dry-run. --apply -y only alters configs on topics present on both sides."
+    emit "Missing dest topics are reported only and are never created."
     emit "Report: ${report}"
     exit 0
   fi
@@ -149,10 +159,12 @@ with open(out, "w", encoding="utf-8") as fh:
 ' "${work}/diff.json" "${work}/alters.tsv"
 
   if [[ ! -s "${work}/alters.tsv" ]]; then
-    emit "Nothing to apply."
+    emit "Nothing to apply (no config drift on topics present on both sides)."
     emit "Report: ${report}"
     exit 0
   fi
+
+  emit "APPLY configs only for intersection topics (no topic create)."
 
   local topic chunk
   while IFS=$'\t' read -r topic chunk; do
