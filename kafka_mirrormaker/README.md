@@ -40,3 +40,19 @@ To shrink DR only for topics that are already compressed on prod, set dest
 set `producer.compression.type` on MM2 — that would compress every mirrored topic.
 `compare_storage.sh` writes `reports/storage-compress-dest-*.txt` (dest-only alters).
 Inferred codec default is `lz4` (`COMPRESS_INFERRED_CODEC=zstd` to change).
+
+## `sync_topic_configs.sh` / `sync_acls.sh`
+
+Compare source (prod) to dest (DR) and optionally make dest match. **Dry-run
+unless `--apply -y`.** Does not create topics or change RF.
+
+```bash
+./sync_topic_configs.sh -c config/clusters/prod.env -c config/clusters/dr.env -y
+./sync_topic_configs.sh -c prod.env -c dr.env -y --apply
+./sync_acls.sh -c prod.env -c dr.env -y
+./sync_acls.sh -c prod.env -c dr.env -y --apply
+./sync_acls.sh -c prod.env -c dr.env -y --apply --prune   # also drop dest-only ACLs
+```
+
+`--prune` is dest-only ACL delete. Topic config sync skips replica-throttle and
+`remote.*` keys unless `--sync-skipped`.
