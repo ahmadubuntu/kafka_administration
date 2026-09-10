@@ -44,7 +44,9 @@ Inferred codec default is `lz4` (`COMPRESS_INFERRED_CODEC=zstd` to change).
 ## `sync_topic_configs.sh` / `sync_acls.sh`
 
 Compare source (prod) to dest (DR) and optionally make dest match. **Dry-run
-unless `--apply -y`.** Does not create topics or change RF.
+unless `--apply -y`.** Never creates missing topics (even with `--apply`).
+`--apply` only sets configs on topics that already exist on both sides.
+Does not change RF.
 
 ```bash
 ./sync_topic_configs.sh -c config/clusters/prod.env -c config/clusters/dr.env -y

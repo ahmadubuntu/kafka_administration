@@ -54,6 +54,8 @@ All configs for topic events are:
         src = {"onlysrc": {"retention.ms": "1"}}
         diffs = config_diffs(src, {})
         self.assertEqual(diffs[0]["dst"], "MISSING_TOPIC")
+        self.assertEqual(diffs[0]["action"], "skip")
+        self.assertEqual(alters_by_topic(diffs), {})
 
     def test_add_config_split(self) -> None:
         chunks = format_add_config([("a", "1"), ("b", "x,y"), ("c", "3")])
