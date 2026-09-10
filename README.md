@@ -4,6 +4,7 @@
 |---------|------|
 | HA realtime check + min.isr / RF fixers | [`kafka_realtime_check/`](kafka_realtime_check/) |
 | Topic batch admin (pattern ops / hygiene / compare) | [`kafka_topic_admin/`](kafka_topic_admin/) |
+| MirrorMaker 2 prod/DR storage + MM health | [`kafka_mirrormaker/`](kafka_mirrormaker/) |
 
 ```bash
 cd kafka_realtime_check

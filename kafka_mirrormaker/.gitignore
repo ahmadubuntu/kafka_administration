@@ -1,0 +1,8 @@
+# Local secrets / generated
+config/clusters/*.env
+!config/clusters/*.example.env
+reports/
+__pycache__/
+*.pyc
+*.prom
+.DS_Store

@@ -12,4 +12,9 @@ kafka_topic_admin/reports/
 kafka_topic_admin/config/clusters/*.env
 !kafka_topic_admin/config/clusters/*.example.env
 
+# kafka_mirrormaker
+kafka_mirrormaker/reports/
+kafka_mirrormaker/config/clusters/*.env
+!kafka_mirrormaker/config/clusters/*.example.env
+
 .DS_Store
