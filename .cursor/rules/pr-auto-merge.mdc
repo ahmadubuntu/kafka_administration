@@ -1,0 +1,17 @@
+---
+description: Merge this repo's PRs after opening; do not wait
+alwaysApply: true
+---
+
+# Merge PRs in kafka_administration
+
+The owner asked to **always merge** implementation PRs in this repository
+after opening them. Do not wait for a second "please merge" message.
+
+1. Open the PR into `main` (feature branch only; never push commits onto `main` directly).
+2. Merge it (`gh pr merge --merge` or squash if the PR is a single commit).
+3. Dual-push the updated `main` to GitHub `origin` and Azure `azure`.
+4. Do not use `bypassPolicy`. If GitHub checks or branch protection block merge, report that.
+
+This repo rule overrides the global "never auto-merge" guidance **for this repo only**.
+`plans/` remains Azure-only: the GitHub PR must not add new `plans/` files.

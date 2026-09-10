@@ -86,6 +86,43 @@ kafka_topic_configs_dump() {
   return 1
 }
 
+mm_resolve_cfg() {
+  local root="${1:-.}" f="$2"
+  [[ -f "$f" ]] && { printf '%s' "$f"; return 0; }
+  [[ -f "${root}/${f}" ]] && { printf '%s' "${root}/${f}"; return 0; }
+  [[ -f "${root}/config/clusters/${f}" ]] && { printf '%s' "${root}/config/clusters/${f}"; return 0; }
+  [[ -f "${root}/config/clusters/${f}.env" ]] && { printf '%s' "${root}/config/clusters/${f}.env"; return 0; }
+  return 1
+}
+
+# Sets SOURCE_ENV DEST_ENV from CONFIG_FILES[2] and ROOT_DIR.
+mm_assign_roles() {
+  local root="${1:-.}"
+  local f role
+  SOURCE_ENV=""; DEST_ENV=""
+  if ((${#CONFIG_FILES[@]} != 2)); then
+    echo "Need exactly two -c inventories (source then dest)" >&2
+    return 2
+  fi
+  local resolved=()
+  for f in "${CONFIG_FILES[@]}"; do
+    resolved+=("$(mm_resolve_cfg "$root" "$f" || { echo "Config not found: $f" >&2; return 2; })")
+  done
+  CONFIG_FILES=("${resolved[@]}")
+  for f in "${CONFIG_FILES[@]}"; do
+    role="$(bash -c 'set -a; source "$1"; set +a; printf "%s" "${ROLE:-}"' _ "$f")"
+    case "$role" in
+      source|prod) SOURCE_ENV="$f" ;;
+      dest|dr) DEST_ENV="$f" ;;
+    esac
+  done
+  if [[ -z "$SOURCE_ENV" || -z "$DEST_ENV" ]]; then
+    SOURCE_ENV="${CONFIG_FILES[0]}"
+    DEST_ENV="${CONFIG_FILES[1]}"
+    echo "ROLE not set in env files - treating first -c as source, second as dest" >&2
+  fi
+}
+
 bytes_to_gib() {
   python3 -c "print('{:.2f}'.format(int('${1:-0}')/1073741824))" 2>/dev/null || echo "0.00"
 }

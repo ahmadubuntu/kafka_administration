@@ -31,6 +31,11 @@ cp config/clusters/dr.example.env config/clusters/dr.env
 ./compare_storage.sh -c config/clusters/prod.env -c config/clusters/dr.env -y --via kafka
 ./check_mirrormaker.sh -c config/clusters/prod.env -c config/clusters/dr.env \
   --mm2-properties /var/opt/kafka/config/mm2.properties -y
+./sync_topic_configs.sh -c config/clusters/prod.env -c config/clusters/dr.env -y
+./sync_acls.sh -c config/clusters/prod.env -c config/clusters/dr.env -y
+# mutate dest only after reviewing dry-run:
+# ./sync_topic_configs.sh ... -y --apply
+# ./sync_acls.sh ... -y --apply
 ```
 
 `--via ssh` is a stub in v0.1 (SKIP until BROKER_HOSTS + SSH are wired).
@@ -43,7 +48,8 @@ cp config/clusters/dr.example.env config/clusters/dr.env
 - Identity MM2 dest offsets are a different space than source; HWM-sum gap is not leftover history.
 - Do not set MM2 `producer.compression.type` globally. Dest `compression.type` only on topics already compressed on prod.
 - MM2 cannot preserve source batch compression (consumer decompresses; one producer codec per flow). Equivalent: dest topic `compression.type` per topic.
+- `sync_topic_configs.sh` / `sync_acls.sh` are source→dest, dry-run unless `--apply -y`. `--prune` deletes dest-only ACLs.
 
 ## Current focus
 
-Latest plan (disk / Azure only): `plans/2026-09-10_034700_plans-azure-only.md`
+Latest plan (disk / Azure only): `plans/2026-09-10_035806_sync-topic-configs-acls.md`
