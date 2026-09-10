@@ -21,6 +21,10 @@ Keep `main` tracking `origin/main`.
 3. `git branch --set-upstream-to=origin/main main` if upstream drifted
 4. If Azure is unreachable, say so explicitly and leave the exact retry commands
 
+Exception: `plans/` is **Azure-only** (see `plans-azure-only.mdc`). Product
+commits still dual-push. A plans-only commit is pushed to `azure` and **not**
+to `origin`.
+
 ```bash
 AUTH_HEADER="AUTHORIZATION: Basic $(printf ':%s' "$AZDO_PAT_DATAPLATFORM" | base64 -w0)"
 git push origin main

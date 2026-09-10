@@ -7,7 +7,12 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mm2_parse import parse_logdirs, parse_topic_configs, is_mm2_internal
+from mm2_parse import (
+    parse_logdirs,
+    parse_topic_configs,
+    is_mm2_internal,
+    recommend_dest_compression,
+)
 
 
 class TestLogdirs(unittest.TestCase):
@@ -66,6 +71,55 @@ Dynamic configs for topic bar are:
         self.assertEqual(cfg["foo"]["retention.ms"], "86400000")
         self.assertEqual(cfg["foo"]["cleanup.policy"], "delete")
         self.assertEqual(cfg["bar"]["retention.bytes"], "1000")
+
+    def test_all_configs_compression(self) -> None:
+        text = """
+All configs for topic transactions are:
+  compression.type=producer sensitive=false synonyms={DEFAULT_CONFIG:compression.type=producer}
+  retention.ms=259200000 sensitive=false
+"""
+        cfg = parse_topic_configs(text)
+        self.assertEqual(cfg["transactions"]["compression.type"], "producer")
+        self.assertEqual(cfg["transactions"]["retention.ms"], "259200000")
+
+
+class TestDestCompression(unittest.TestCase):
+    def test_explicit_src_codec_only(self) -> None:
+        extras = [(10**9, "orders", "orders", 100, 200)]
+        recs = recommend_dest_compression(
+            extras,
+            {"orders": {"compression.type": "zstd"}},
+            {"orders": {"compression.type": "producer"}},
+            "asia-gen",
+            "afra-gen",
+        )
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["codec"], "zstd")
+        self.assertEqual(recs[0]["reason"], "src_topic_config")
+
+    def test_no_global_on_small_ratio(self) -> None:
+        extras = [(10**8, "tiny", "tiny", 10**9, int(1.1 * 10**9))]
+        recs = recommend_dest_compression(
+            extras,
+            {"tiny": {"compression.type": "producer"}},
+            {"tiny": {"compression.type": "producer"}},
+            "asia-gen",
+            "afra-gen",
+        )
+        self.assertEqual(recs, [])
+
+    def test_size_ratio_inferred(self) -> None:
+        extras = [(134 * 10**9, "transactions", "transactions", 51 * 10**9, 186 * 10**9)]
+        recs = recommend_dest_compression(
+            extras,
+            {"transactions": {"compression.type": "producer"}},
+            {"transactions": {"compression.type": "producer"}},
+            "asia-gen",
+            "afra-gen",
+        )
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["codec"], "lz4")
+        self.assertEqual(recs[0]["reason"], "size_ratio_implies_src_compressed")
 
 
 class TestInternal(unittest.TestCase):

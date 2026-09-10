@@ -300,9 +300,17 @@ def parse_topic_configs(text: str) -> dict[str, dict[str, str]]:
     """Parse kafka-configs --entity-type topics --describe [--all]."""
     current = None
     out: dict[str, dict[str, str]] = defaultdict(dict)
-    want = ("retention.ms", "retention.bytes", "cleanup.policy", "min.insync.replicas")
+    want = (
+        "retention.ms",
+        "retention.bytes",
+        "cleanup.policy",
+        "min.insync.replicas",
+        "compression.type",
+        "message.timestamp.type",
+    )
     header = re.compile(
-        r"(?:Dynamic configs for topic|Configs for topic)\s+(\S+)", re.I
+        r"(?:All configs for topic|Dynamic configs for topic|Configs for topic)\s+(\S+)",
+        re.I,
     )
     for line in text.splitlines():
         m = header.search(line)
@@ -316,6 +324,81 @@ def parse_topic_configs(text: str) -> dict[str, dict[str, str]]:
                 val = km.group(1).rstrip(",").split(",")[0]
                 out[current][key] = val
     return dict(out)
+
+
+EXPLICIT_CODECS = frozenset({"gzip", "snappy", "lz4", "zstd"})
+
+
+def topic_compression(cfg: dict[str, str] | None) -> str:
+    raw = (cfg or {}).get("compression.type") or "producer"
+    return raw.split(",")[0].strip().lower()
+
+
+def recommend_dest_compression(
+    extras: list[tuple[int, str, str, int, int]],
+    src_configs: dict[str, dict[str, str]],
+    dst_configs: dict[str, dict[str, str]],
+    source_alias: str,
+    dest_alias: str,
+    *,
+    inferred_codec: str = "lz4",
+    min_ratio: float = 2.5,
+    min_extra_bytes: int = 1073741824,
+) -> list[dict[str, Any]]:
+    """Dest-only topic compression. Never a global MM2 producer codec.
+
+    extras rows: (extra_unique, src_topic, dst_topic, src_unique, dst_unique)
+    """
+    codec = inferred_codec.strip().lower()
+    if codec not in EXPLICIT_CODECS:
+        codec = "lz4"
+    out: list[dict[str, Any]] = []
+    for extra, st, dt, suniq, duniq in extras:
+        if skip_hwm_compare(st, source_alias, dest_alias) or skip_hwm_compare(
+            dt, source_alias, dest_alias
+        ):
+            continue
+        sc = topic_compression(src_configs.get(st))
+        dc = topic_compression(dst_configs.get(dt))
+        if dc in EXPLICIT_CODECS and (sc not in EXPLICIT_CODECS or dc == sc):
+            continue
+        if sc in EXPLICIT_CODECS and dc != sc:
+            out.append(
+                {
+                    "src_topic": st,
+                    "dst_topic": dt,
+                    "codec": sc,
+                    "reason": "src_topic_config",
+                    "src_codec": sc,
+                    "dst_codec": dc,
+                    "extra": extra,
+                    "src_unique": suniq,
+                    "dst_unique": duniq,
+                }
+            )
+            continue
+        if sc == "uncompressed" or dc == "uncompressed":
+            continue
+        if suniq <= 0:
+            continue
+        ratio = duniq / suniq
+        if extra >= min_extra_bytes and ratio >= min_ratio:
+            out.append(
+                {
+                    "src_topic": st,
+                    "dst_topic": dt,
+                    "codec": codec,
+                    "reason": "size_ratio_implies_src_compressed",
+                    "src_codec": sc,
+                    "dst_codec": dc,
+                    "extra": extra,
+                    "src_unique": suniq,
+                    "dst_unique": duniq,
+                    "ratio": ratio,
+                }
+            )
+    out.sort(key=lambda r: -int(r["extra"]))
+    return out
 
 
 def parse_offsets(text: str) -> dict[tuple[str, int], int]:
