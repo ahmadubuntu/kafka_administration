@@ -50,12 +50,41 @@ def clusters(props: dict[str, str]) -> list[str]:
 
 
 def enabled_flows(props: dict[str, str]) -> list[tuple[str, str]]:
+    """Only `{src}->{dst}.enabled=true`, not `{src}->{dst}.checkpoints.enabled`."""
+    known = set(clusters(props))
     flows = []
     for k, v in props.items():
+        if v.lower() not in ("true", "yes", "1"):
+            continue
         m = re.match(r"^([A-Za-z0-9._-]+)->([A-Za-z0-9._-]+)\.enabled$", k)
-        if m and v.lower() in ("true", "yes", "1"):
-            flows.append((m.group(1), m.group(2)))
+        if not m:
+            continue
+        src, dst = m.group(1), m.group(2)
+        if known and (src not in known or dst not in known):
+            continue
+        if not known and ("." in dst or "." in src):
+            # without clusters=, reject dotted dest (avoids .checkpoints.enabled)
+            continue
+        flows.append((src, dst))
     return flows
+
+
+def consumer_group_ids(props: dict[str, str]) -> list[str]:
+    """asia-gen.consumer.group.id and similar."""
+    found = []
+    for k, v in props.items():
+        if k.endswith(".consumer.group.id") or k == "group.id":
+            if v and v not in found:
+                found.append(v)
+    return found
+
+
+def skip_hwm_compare(topic: str, source_alias: str, dest_alias: str) -> bool:
+    if is_mm2_internal(topic, source_alias, dest_alias):
+        return True
+    if topic.startswith("__"):
+        return True
+    return False
 
 
 def map_source_to_dest(source_topic: str, policy: str, source_alias: str) -> str:
@@ -105,7 +134,18 @@ def parse_logdirs_json(text: str) -> list[dict[str, Any]]:
     start = text.find("{")
     if start < 0:
         return []
-    data = json.loads(text[start:])
+    blob = text[start:]
+    try:
+        data = json.loads(blob)
+    except json.JSONDecodeError:
+        # trailing log lines after JSON
+        end = blob.rfind("}")
+        if end < 0:
+            return []
+        try:
+            data = json.loads(blob[: end + 1])
+        except json.JSONDecodeError:
+            return []
     rows = []
     brokers = data.get("brokers") or data.get("Brokers") or []
     if isinstance(data, list):
@@ -116,16 +156,26 @@ def parse_logdirs_json(text: str) -> list[dict[str, Any]]:
             logdir = ld.get("logDir") or ld.get("logdir") or ""
             err = ld.get("error")
             parts = ld.get("partitions") or {}
+            items: list[tuple[Any, Any]] = []
             if isinstance(parts, dict):
-                items = parts.items()
-            else:
-                items = []
+                items = list(parts.items())
+            elif isinstance(parts, list):
+                # Kafka 3.x / KIP-849: [{partition: "topic-0", size: N}, ...]
+                for meta in parts:
+                    if not isinstance(meta, dict):
+                        continue
+                    key = meta.get("partition") or meta.get("topicPartition") or ""
+                    items.append((key, meta))
             for key, meta in items:
                 if not isinstance(meta, dict):
                     continue
                 size = int(meta.get("size") or meta.get("Size") or 0)
                 part = meta.get("partition")
                 topic = meta.get("topic")
+                # Array items often put the full "topic-0" in partition.
+                if topic is None and part is not None and not isinstance(part, int):
+                    key = str(part)
+                    part = None
                 if topic is None:
                     # key like "name-0"
                     if "-" in str(key):
@@ -149,6 +199,73 @@ def parse_logdirs_json(text: str) -> list[dict[str, Any]]:
                     }
                 )
     return rows
+
+
+def _split_topic_part(key: str) -> tuple[str, Any]:
+    if "-" not in key:
+        return key, 0
+    topic, _, p = key.rpartition("-")
+    try:
+        return topic, int(p)
+    except ValueError:
+        return key, 0
+
+
+def parse_logdirs_text(text: str) -> list[dict[str, Any]]:
+    """Parse kafka-log-dirs --describe without --json (older / some 3.x builds)."""
+    rows: list[dict[str, Any]] = []
+    broker: Any = "?"
+    logdir = ""
+    # topic-0: size=123  |  topic-0 size: 123  |  topic: foo partition: 0 size: 123
+    re_broker = re.compile(r"(?i)\bbrokers?\b[:\s]+(\d+)\b")
+    re_logdir = re.compile(r"(?i)log[-_ ]?dir(?:ectory)?\s*[:=]\s*(\S+)")
+    re_tp_size = re.compile(
+        r"(?i)(?P<tp>[A-Za-z0-9._-]+-\d+)\s*[:\s]+size\s*[:=]\s*(?P<size>\d+)"
+    )
+    re_named = re.compile(
+        r"(?i)topic\s*[:=]\s*(?P<topic>\S+)\s+partition\s*[:=]\s*(?P<part>\d+)\s+size\s*[:=]\s*(?P<size>\d+)"
+    )
+    for line in text.splitlines():
+        bm = re_broker.search(line)
+        if bm and "size" not in line.lower():
+            broker = bm.group(1)
+        lm = re_logdir.search(line)
+        if lm:
+            logdir = lm.group(1).rstrip(",")
+        named_hits = list(re_named.finditer(line))
+        if named_hits:
+            for m in named_hits:
+                rows.append(
+                    {
+                        "broker": broker,
+                        "logdir": logdir,
+                        "error": None,
+                        "topic": m.group("topic"),
+                        "partition": int(m.group("part")),
+                        "size": int(m.group("size")),
+                    }
+                )
+            continue
+        for m in re_tp_size.finditer(line):
+            topic, part = _split_topic_part(m.group("tp"))
+            rows.append(
+                {
+                    "broker": broker,
+                    "logdir": logdir,
+                    "error": None,
+                    "topic": topic,
+                    "partition": part,
+                    "size": int(m.group("size")),
+                }
+            )
+    return rows
+
+
+def parse_logdirs(text: str) -> list[dict[str, Any]]:
+    rows = parse_logdirs_json(text)
+    if rows:
+        return rows
+    return parse_logdirs_text(text)
 
 
 def parse_topic_describe(text: str) -> dict[str, dict[str, Any]]:
@@ -184,19 +301,20 @@ def parse_topic_configs(text: str) -> dict[str, dict[str, str]]:
     current = None
     out: dict[str, dict[str, str]] = defaultdict(dict)
     want = ("retention.ms", "retention.bytes", "cleanup.policy", "min.insync.replicas")
+    header = re.compile(
+        r"(?:Dynamic configs for topic|Configs for topic)\s+(\S+)", re.I
+    )
     for line in text.splitlines():
-        m = re.search(
-            r"(?:Dynamic configs for topic|Configs for topic)\s+(\S+)", line, re.I
-        )
+        m = header.search(line)
         if m:
-            current = m.group(1).rstrip(":")
-            continue
+            current = m.group(1).rstrip(":").rstrip(",")
         if current is None:
             continue
-        km = re.search(r"^\s*([A-Za-z0-9._-]+)=(\S+)", line)
-        if km and km.group(1) in want:
-            val = km.group(2).split(",")[0]
-            out[current][km.group(1)] = val
+        for key in want:
+            km = re.search(rf"(?:^|[\s,]){re.escape(key)}=(\S+)", line)
+            if km:
+                val = km.group(1).rstrip(",").split(",")[0]
+                out[current][key] = val
     return dict(out)
 
 
@@ -216,13 +334,13 @@ def parse_offsets(text: str) -> dict[tuple[str, int], int]:
 
 
 def cmd_parse_logdirs() -> None:
-    rows = parse_logdirs_json(sys.stdin.read())
+    rows = parse_logdirs(sys.stdin.read())
     for r in rows:
         print(f"{r['broker']}\t{r['topic']}\t{r['partition']}\t{r['size']}")
 
 
 def cmd_broker_totals() -> None:
-    rows = parse_logdirs_json(sys.stdin.read())
+    rows = parse_logdirs(sys.stdin.read())
     by_b: dict[Any, int] = defaultdict(int)
     for r in rows:
         by_b[r["broker"]] += r["size"]
@@ -232,7 +350,7 @@ def cmd_broker_totals() -> None:
 
 def cmd_topic_totals() -> None:
     """Max replica size per topic-partition summed (unique-ish) AND raw sum."""
-    rows = parse_logdirs_json(sys.stdin.read())
+    rows = parse_logdirs(sys.stdin.read())
     raw: dict[str, int] = defaultdict(int)
     per_tp: dict[tuple[str, Any], int] = defaultdict(int)
     for r in rows:
@@ -269,6 +387,11 @@ def main() -> None:
         props = load_props(sys.argv[2])
         for a, b in enabled_flows(props):
             print(f"{a}->{b}")
+    elif cmd == "broker-ids":
+        print(",".join(parse_api_versions_brokers(sys.stdin.read())))
+    elif cmd == "consumer-groups":
+        for g in consumer_group_ids(load_props(sys.argv[2])):
+            print(g)
     else:
         print(f"unknown command {cmd}", file=sys.stderr)
         sys.exit(2)

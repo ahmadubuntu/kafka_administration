@@ -11,6 +11,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_VERSION="$(cat "${ROOT_DIR}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo 0.0.0)"
 LIB_DIR="${LIB_DIR:-${ROOT_DIR}/../kafka_realtime_check/lib}"
 MM_LIB="${ROOT_DIR}/lib"
+export MM_LIB
+export PYTHONPATH="${MM_LIB}${PYTHONPATH:+:${PYTHONPATH}}"
 
 # shellcheck source=/dev/null
 source "${LIB_DIR}/common.sh"
@@ -141,7 +143,7 @@ _probe_unit() {
   nrest="$(systemctl show "${MM2_UNIT}" -p NRestarts --value 2>/dev/null || echo "?")"
   emit "Active: ${st}  NRestarts: ${nrest}"
   if [[ "$st" != "active" ]]; then
-    emit "${C_RED}FAIL${C_RESET} unit is not active — journal:"
+    emit "${C_RED}FAIL${C_RESET} unit is not active - journal:"
   else
     emit "${C_GREEN}PASS${C_RESET} unit active"
   fi
@@ -178,7 +180,7 @@ _probe_process() {
   heap="$(tr '\0' '\n' <"/proc/${pid}/environ" 2>/dev/null | grep '^KAFKA_HEAP_OPTS=' || true)"
   emit "${heap:-KAFKA_HEAP_OPTS=(not in environ)}"
   if [[ "$heap" == *Xmx2G* || "$heap" == *Xmx2g* ]]; then
-    emit "${C_YELLOW}WARN${C_RESET} heap is 2G — often tight for a full-cluster MM2 copy"
+    emit "${C_YELLOW}WARN${C_RESET} heap is 2G - often tight for a full-cluster MM2 copy"
   fi
   local nfd
   nfd="$(ls /proc/${pid}/fd 2>/dev/null | wc -l | tr -d ' ')"
@@ -190,6 +192,7 @@ _internal_names() {
   printf '%s\n' \
     "${sa}.heartbeats" \
     "${da}.heartbeats" \
+    "heartbeats" \
     "${sa}.checkpoints.internal" \
     "${da}.checkpoints.internal" \
     "mm2-offset-syncs.${sa}.internal" \
@@ -198,11 +201,13 @@ _internal_names() {
 
 _probe_internal_topics() {
   section "MM2 internal topics (dest log-dirs + HWM)"
-  local names raw totals
+  local names
   mapfile -t names < <(_internal_names "$SOURCE_ALIAS" "$DEST_ALIAS")
-  raw="$(kafka_cli "$DEST_ENV" kafka-log-dirs.sh --describe --json 2>/dev/null || true)"
-  printf '%s\n' "$raw" >"${WORK}/dst.logdirs.json"
+  kafka_log_dirs_dump "$DEST_ENV" "${WORK}/dst.logdirs.json" 2>"${WORK}/dst.logdirs.err" || true
   python3 "${MM_LIB}/mm2_parse.py" topic-totals <"${WORK}/dst.logdirs.json" >"${WORK}/dst.topics"
+  if [[ ! -s "${WORK}/dst.topics" ]]; then
+    emit "${C_YELLOW}WARN${C_RESET} empty dest log-dirs. stderr: $(head -c 200 "${WORK}/dst.logdirs.err" 2>/dev/null)"
+  fi
   kafka_cli "$DEST_ENV" kafka-get-offsets.sh --time -1 >"${WORK}/dst.off" 2>/dev/null || true
   local t uniq hwm
   emit "$(printf '%-42s %10s %12s' topic unique_GiB latest_hwm_sum)"
@@ -217,18 +222,59 @@ _probe_internal_topics() {
   done
 }
 
+_group_name_match() {
+  grep -iE 'mm2|mirror|mirrormaker|genasia|connect-mirror' "$@" 2>/dev/null || true
+}
+
+_describe_group_on() {
+  local envf="$1" side="$2" g="$3"
+  local out
+  out="$(kafka_cli "$envf" kafka-consumer-groups.sh --describe --group "$g" 2>&1 || true)"
+  if [[ -z "$out" ]]; then
+    return 1
+  fi
+  if printf '%s\n' "$out" | grep -qiE 'does not exist|Unknown consumer group'; then
+    return 1
+  fi
+  emit "describe group ${g} on ${side}"
+  printf '%s\n' "$out" | head -60
+  return 0
+}
+
 _probe_lag() {
-  section "Lag: consumer groups on source + HWM map"
+  section "Lag: consumer groups on source + dest + HWM map"
   kafka_cli "$SOURCE_ENV" kafka-consumer-groups.sh --list >"${WORK}/src.groups" 2>/dev/null || true
-  emit "Source groups matching mm2/connect/mirror:"
-  grep -iE 'mm2|mirror|connect' "${WORK}/src.groups" 2>/dev/null | head -30 || emit "  (none matched name filter)"
+  kafka_cli "$DEST_ENV" kafka-consumer-groups.sh --list >"${WORK}/dst.groups" 2>/dev/null || true
+  local -a groups=()
   local g
+  if [[ -f "$MM2_PROPERTIES" ]]; then
+    while IFS= read -r g; do
+      [[ -n "$g" ]] && groups+=("$g")
+    done < <(python3 "${MM_LIB}/mm2_parse.py" consumer-groups "$MM2_PROPERTIES")
+  fi
   while IFS= read -r g; do
     [[ -z "$g" ]] && continue
+    groups+=("$g")
+  done < <(_group_name_match "${WORK}/src.groups" "${WORK}/dst.groups")
+  # unique
+  if ((${#groups[@]})); then
+    mapfile -t groups < <(printf '%s\n' "${groups[@]}" | awk 'NF && !seen[$0]++')
+  fi
+  emit "MM2 consumer groups (from mm2.properties + name match on source/dest): ${#groups[@]}"
+  if ((${#groups[@]} == 0)); then
+    emit "  (none - check *.consumer.group.id in mm2.properties)"
+  fi
+  for g in "${groups[@]}"; do
+    [[ -z "$g" ]] && continue
     emit ""
-    emit "describe group ${g}"
-    kafka_cli "$SOURCE_ENV" kafka-consumer-groups.sh --describe --group "$g" 2>/dev/null | head -40 || true
-  done < <(grep -iE 'mm2|mirror|connect' "${WORK}/src.groups" 2>/dev/null | head -8)
+    if _describe_group_on "$SOURCE_ENV" source "$g"; then
+      continue
+    fi
+    if _describe_group_on "$DEST_ENV" dest "$g"; then
+      continue
+    fi
+    emit "WARN group ${g} does not exist on source or dest (MM2 may track progress in offset-syncs only)"
+  done
 
   emit ""
   emit "Mapped HWM sum gap (dest - source); WARN/FAIL vs LAG_WARN=${LAG_WARN} LAG_FAIL=${LAG_FAIL}"
@@ -236,13 +282,13 @@ _probe_lag() {
   kafka_cli "$DEST_ENV" kafka-get-offsets.sh --time -1 >"${WORK}/dst.off" 2>/dev/null || true
   local policy
   policy="$(python3 "${MM_LIB}/mm2_parse.py" policy "$MM2_PROPERTIES" 2>/dev/null || echo default)"
-  python3 - "$policy" "$SOURCE_ALIAS" "${WORK}/src.off" "${WORK}/dst.off" "$LAG_WARN" "$LAG_FAIL" <<'PY'
+  python3 - "$policy" "$SOURCE_ALIAS" "$DEST_ALIAS" "${WORK}/src.off" "${WORK}/dst.off" "$LAG_WARN" "$LAG_FAIL" <<'PY'
 import sys, os
 sys.path.insert(0, os.environ["MM_LIB"])
-from mm2_parse import parse_offsets, map_source_to_dest
+from mm2_parse import parse_offsets, map_source_to_dest, skip_hwm_compare
 from collections import defaultdict
-policy, alias, srcp, dstp = sys.argv[1:5]
-warn, fail = int(sys.argv[5]), int(sys.argv[6])
+policy, alias, dest_alias, srcp, dstp = sys.argv[1:6]
+warn, fail = int(sys.argv[6]), int(sys.argv[7])
 src = parse_offsets(open(srcp, encoding="utf-8", errors="replace").read())
 dst = parse_offsets(open(dstp, encoding="utf-8", errors="replace").read())
 ss, dd = defaultdict(int), defaultdict(int)
@@ -252,7 +298,11 @@ for (t, p), o in dst.items():
     dd[t] += max(o, 0)
 behind = []
 ahead = []
+skipped = 0
 for st, so in ss.items():
+    if skip_hwm_compare(st, alias, dest_alias):
+        skipped += 1
+        continue
     dt = map_source_to_dest(st, policy, alias)
     if dt not in dd:
         continue
@@ -262,18 +312,16 @@ for st, so in ss.items():
     elif gap < 0:
         ahead.append((-gap, st, dt, so, dd[dt]))
 behind.sort(reverse=True)
+n_fail = sum(1 for g, *_ in behind if g >= fail)
+n_warn = sum(1 for g, *_ in behind if warn <= g < fail)
 print("Dest behind source (replication lag), top 25:")
 print(f"{'lag_hwm':>12} pair")
-n_fail = n_warn = 0
 for gap, st, dt, so, do in behind[:25]:
-    tag = "OK"
-    if gap >= fail:
-        tag, n_fail = "FAIL", n_fail + 1
-    elif gap >= warn:
-        tag, n_warn = "WARN", n_warn + 1
+    tag = "FAIL" if gap >= fail else ("WARN" if gap >= warn else "OK")
     print(f"{gap:12d} {tag:4} {st} -> {dt}")
 print(f"lagging_topics={len(behind)} warn_ge_{warn}={n_warn} fail_ge_{fail}={n_fail}")
 print(f"dest_ahead_count={len(ahead)} (source retention already dropped data dest still holds)")
+print(f"skipped_internal_or_underscore_topics={skipped}")
 PY
 
   emit ""
@@ -300,18 +348,18 @@ _probe_jmx() {
     done
     emit "Look for replication-latency-ms, checkpoint-latency-ms, byte-rate, record-count, failed task counts"
   else
-    emit "INFO  Jolokia not reachable at ${JOLOKIA_URL} — enable JMX on MM2 JVM to export replication-latency-ms / byte-rate"
+    emit "INFO  Jolokia not reachable at ${JOLOKIA_URL} - enable JMX on MM2 JVM to export replication-latency-ms / byte-rate"
   fi
 }
 
 _probe_rest() {
   section "Connect REST ${REST_URL}"
   if curl -sf --max-time 3 "${REST_URL}/" >/dev/null 2>&1; then
-    emit "REST up — connectors:"
+    emit "REST up - connectors:"
     curl -s --max-time 8 "${REST_URL}/connectors" || true
     echo
   else
-    emit "INFO  dedicated connect-mirror-maker.sh usually has no REST API on ${REST_URL} — not a cluster FAIL"
+    emit "INFO  dedicated connect-mirror-maker.sh usually has no REST API on ${REST_URL} - not a cluster FAIL"
   fi
 }
 

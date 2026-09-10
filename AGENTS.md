@@ -34,6 +34,12 @@ cp config/clusters/dr.example.env config/clusters/dr.env
 
 `--via ssh` is a stub in v0.1 (SKIP until BROKER_HOSTS + SSH are wired).
 
+## Known landmines (MM2 toolkit)
+
+- Kafka 3.9 `kafka-log-dirs.sh` does **not** accept `--json`. Default stdout is JSON plus status lines. Parse with `mm2_parse.parse_logdirs` (JSON dict or array partitions, then text).
+- Dedicated MM2 `*.consumer.group.id` may not exist on source; also list/describe on dest. HWM lag is the fallback.
+- Do not treat `__consumer_offsets` HWM as mirror lag (`skip_hwm_compare`).
+
 ## Current focus
 
-Latest plan: [`plans/2026-08-24_113700_mm2-prod-dr-storage.md`](plans/2026-08-24_113700_mm2-prod-dr-storage.md)
+Latest plan: [`plans/2026-09-10_015649_mm2-compare-storage-is-python.md`](plans/2026-09-10_015649_mm2-compare-storage-is-python.md)

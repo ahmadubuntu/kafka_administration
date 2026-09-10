@@ -16,7 +16,12 @@ log-dirs totals, mapped topic unique bytes, MM2 internal topics, RF, retention d
 ./compare_storage.sh -c prod.env -c dr.env --only summary,logdirs,gaps --list-tasks
 ```
 
+`compare_storage.sh` is **bash** (`head -1` must be `#!/usr/bin/env bash`). Do not replace it with `lib/join_storage.py`.
+
 Set `ROLE=source` / `ROLE=dest` in env files, or pass source first then dest.
+`kafka-log-dirs` is called with `--broker-list` from `kafka-broker-api-versions` (required on Kafka 3.x).
+Kafka 3.9 tools have **no `--json` flag**; the script uses `--describe` and parses the default JSON (or text on older CLIs).
+Default includes `_` topics (`--exclude-internal` to skip).
 
 ## `check_mirrormaker.sh`
 
