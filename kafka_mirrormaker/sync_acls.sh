@@ -43,11 +43,12 @@ Sync ACLs source → dest  v${SCRIPT_VERSION}
   --apply               Add missing dest ACLs (default: print only)
   --prune               With --apply: also remove dest-only ACLs
   --local-bin DIR
-  -y, --yes             Required together with --apply
+  -y, --yes             Required together with --apply (passes --force to kafka-acls)
   -v, --verbose
   -h, --help
 
 Does not change topic data. Authorizer must allow this admin user to describe/add ACLs.
+With -y, kafka-acls.sh gets --force so --remove does not stop at (y/n) prompts.
 EOF
 }
 
@@ -71,7 +72,12 @@ parse_args() {
 _run_acl_line() {
   local envf="$1"
   shift
-  kafka_cli "$envf" kafka-acls.sh "$@"
+  local -a kargs=("$@")
+  # kafka-acls --remove prompts "(y/n)" unless --force; -y on this script means non-interactive.
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    kargs+=(--force)
+  fi
+  kafka_cli "$envf" kafka-acls.sh "${kargs[@]}"
 }
 
 main() {
@@ -164,9 +170,12 @@ with open(out, "w", encoding="utf-8") as fh:
             fh.write("DEL\t{rtype}\t{name}\t{pattern}\t{principal}\t{host}\t{operation}\t{perm}\n".format(**r))
 ' "${work}/diff.json" "${work}/ops.tsv" "$([[ "$PRUNE" == "1" ]] && echo 1 || echo 0)"
 
-  local ok=0 fail=0 op rtype name pattern principal host operation perm
+  local ok=0 fail=0 n_add=0 n_del=0 op rtype name pattern principal host operation perm
   local -a argv=()
   if [[ -s "${work}/ops.tsv" ]]; then
+    n_add="$(grep -c '^ADD' "${work}/ops.tsv" || true)"
+    n_del="$(grep -c '^DEL' "${work}/ops.tsv" || true)"
+    emit "Planned kafka-acls: add=${n_add} remove=${n_del} (with --force because -y)"
     while IFS=$'\t' read -r op rtype name pattern principal host operation perm; do
       [[ -z "$op" ]] && continue
       argv=()
@@ -188,7 +197,10 @@ print("\n".join(acl_cli_args(e, remove=(sys.argv[8]=="DEL"))))
     done <"${work}/ops.tsv"
   fi
 
-  emit "Applied ok=${ok} fail=${fail}"
+  emit "Applied ok=${ok} fail=${fail} (planned add=${n_add:-0} remove=${n_del:-0})"
+  if [[ "$PRUNE" == "1" && "${n_del:-0}" -gt 0 && "$ok" -lt "${n_del:-0}" ]]; then
+    emit "${C_YELLOW}WARN${C_RESET} fewer removes succeeded than planned; re-run dry-run to see remaining extras"
+  fi
   emit "Report: ${report}"
   [[ "$fail" -eq 0 ]]
 }
