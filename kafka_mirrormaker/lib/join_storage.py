@@ -6,7 +6,26 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+def _ensure_mm_lib() -> None:
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.environ.get("MM_LIB", ""),
+        here,
+        os.path.join(here, "lib"),
+        os.path.join(os.path.dirname(here), "lib"),
+    ]
+    for cand in candidates:
+        if cand and os.path.isfile(os.path.join(cand, "mm2_parse.py")):
+            if cand not in sys.path:
+                sys.path.insert(0, cand)
+            return
+    raise ModuleNotFoundError(
+        "mm2_parse.py not found (need kafka_mirrormaker/lib on PYTHONPATH or MM_LIB)"
+    )
+
+
+_ensure_mm_lib()
 from mm2_parse import (  # noqa: E402
     is_mm2_internal,
     map_dest_to_source,
@@ -178,8 +197,10 @@ def main() -> None:
 
     print()
     print("=== Topic config drift (retention / cleanup) ===")
-    if not cfg_diffs:
-        print("  (none parsed, or configs not collected)")
+    if not src_c and not dst_c:
+        print("  (configs not collected or not parsed)")
+    elif not cfg_diffs:
+        print("  (no retention/cleanup differences on mapped pairs)")
     else:
         for st, dt, key, sv, dv in cfg_diffs[:50]:
             print(f"  {key}: {st}={sv}  {dt}={dv}")
@@ -188,4 +209,15 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    argv0 = os.path.basename(sys.argv[0]) if sys.argv else ""
+    bash_args = {"-c", "--config", "-y", "--yes", "--via", "--only", "--skip"}
+    if argv0.endswith(".sh") or (len(sys.argv) > 1 and sys.argv[1] in bash_args):
+        sys.stderr.write(
+            "This Python file is lib/join_storage.py, not the storage compare driver.\n"
+            "On the MM host run the bash wrapper:\n"
+            "  ./compare_storage.sh -c config/clusters/prod.env -c config/clusters/dr.env -y\n"
+            "If compare_storage.sh starts with 'import' / 'from mm2_parse', it was overwritten;\n"
+            "restore the bash script (head -1 must be #!/usr/bin/env bash).\n"
+        )
+        sys.exit(2)
     main()

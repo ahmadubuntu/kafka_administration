@@ -10,6 +10,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_VERSION="$(cat "${ROOT_DIR}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo 0.0.0)"
 LIB_DIR="${LIB_DIR:-${ROOT_DIR}/../kafka_realtime_check/lib}"
 MM_LIB="${ROOT_DIR}/lib"
+export MM_LIB
+export PYTHONPATH="${MM_LIB}${PYTHONPATH:+:${PYTHONPATH}}"
 
 # shellcheck source=/dev/null
 source "${LIB_DIR}/common.sh"
@@ -19,6 +21,9 @@ source "${LIB_DIR}/tasks.sh"
 source "${LIB_DIR}/entity_filter.sh"
 # shellcheck source=/dev/null
 source "${MM_LIB}/cli.sh"
+
+# Full disk picture includes '_' topics unless the operator excludes them.
+INCLUDE_INTERNAL=1
 
 VIA="kafka"
 NONINTERACTIVE=0
@@ -82,6 +87,7 @@ parse_args() {
       --pattern|--include|--topic-pattern) entity_filter_add_pattern "$2"; shift 2 ;;
       --exclude|--exclude-pattern) entity_filter_add_exclude "$2"; shift 2 ;;
       --include-internal) INCLUDE_INTERNAL=1; shift ;;
+      --exclude-internal) INCLUDE_INTERNAL=0; shift ;;
       --only) ONLY_TASKS="$2"; shift 2 ;;
       --skip) SKIP_TASKS="$2"; shift 2 ;;
       --ask-tasks) ASK_TASKS=1; shift ;;
@@ -124,7 +130,7 @@ _assign_roles() {
   if [[ -z "$SOURCE_ENV" || -z "$DEST_ENV" ]]; then
     SOURCE_ENV="${CONFIG_FILES[0]}"
     DEST_ENV="${CONFIG_FILES[1]}"
-    emit "ROLE not set in env files — treating first -c as source, second as dest"
+    emit "ROLE not set in env files - treating first -c as source, second as dest"
   fi
 }
 
@@ -139,11 +145,24 @@ _env_get() {
 
 _fetch_logdirs() {
   local envf="$1" out="$2"
-  local raw
-  raw="$(kafka_cli "$envf" kafka-log-dirs.sh --describe --json 2>/dev/null || true)"
-  printf '%s\n' "$raw" >"${out}.json"
+  local rc=0
+  set +e
+  kafka_log_dirs_dump "$envf" "${out}.json" 2>"${out}.err"
+  rc=$?
+  set -e
+  : >>"${out}.json"
   python3 "${MM_LIB}/mm2_parse.py" broker-totals <"${out}.json" >"${out}.brokers"
   python3 "${MM_LIB}/mm2_parse.py" topic-totals <"${out}.json" >"${out}.topics"
+  local brows
+  brows="$(wc -l <"${out}.brokers" | tr -d ' ')"
+  if [[ "$brows" == "0" ]]; then
+    emit "${C_YELLOW}WARN${C_RESET} empty log-dirs parse for ${envf} (rc=${rc}). First lines:"
+    head -c 400 "${out}.json" | tr '\n' ' '
+    emit ""
+    [[ -s "${out}.err" ]] && emit "stderr: $(head -c 300 "${out}.err")"
+  else
+    emit "  ${envf}: ${brows} broker log-dir totals"
+  fi
 }
 
 _filter_topic_totals() {
@@ -234,10 +253,8 @@ main() {
 
   if tasks_selected configs; then
     section "Topic configs (retention / cleanup)"
-    kafka_cli "$SOURCE_ENV" kafka-configs.sh --entity-type topics --describe --all \
-      >"${WORK}/src.configs" 2>/dev/null || true
-    kafka_cli "$DEST_ENV" kafka-configs.sh --entity-type topics --describe --all \
-      >"${WORK}/dst.configs" 2>/dev/null || true
+    kafka_topic_configs_dump "$SOURCE_ENV" "${WORK}/src.configs" || true
+    kafka_topic_configs_dump "$DEST_ENV" "${WORK}/dst.configs" || true
   fi
 
   if tasks_selected summary || tasks_selected logdirs || tasks_selected topics || tasks_selected configs || tasks_selected gaps; then
@@ -311,5 +328,4 @@ PY
   emit "Done."
 }
 
-export MM_LIB
 main "$@"
