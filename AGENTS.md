@@ -53,5 +53,5 @@ cp config/clusters/dr.example.env config/clusters/dr.env
 
 ## Current focus
 
-Latest plan (disk / Azure only): `plans/2026-09-10_050500_sync-acls-prune-force.md`
-Active Spec Kit feature: `specs/001-acl-user-resource`
+Latest plan (disk / Azure only): `plans/2026-10-17_074800_k8s-dev-3vantage-benchmark.md`
+Active Spec Kit feature: `specs/002-k8s-dev-perf-benchmark`
